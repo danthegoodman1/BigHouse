@@ -14,7 +14,7 @@ while true; do
 done
 
 echo "Cluster bootstrapped, executing query"
-time docker exec -it bighouse-ch-1-1 clickhouse-client -q "select * from s3Cluster('randomclustername', 'https://datasets-documentation.s3.eu-west-3.amazonaws.com/aapl_stock.csv', 'CSVWithNames') LIMIT 5"
-# time docker exec -it bighouse-ch-1-1 clickhouse-client -q "select * from s3('https://datasets-documentation.s3.eu-west-3.amazonaws.com/aapl_stock.csv', 'CSVWithNames') LIMIT 5"
+time docker exec -it bighouse-ch-1-1 clickhouse-client -q "select * from urlCluster('randomclustername', 'https://datasets-documentation.s3.eu-west-3.amazonaws.com/aapl_stock.csv', 'CSVWithNames') LIMIT 5"
+# time docker exec -it bighouse-ch-1-1 clickhouse-client -q "select * from url('https://datasets-documentation.s3.eu-west-3.amazonaws.com/aapl_stock.csv', 'CSVWithNames') LIMIT 5"
 
 docker compose down

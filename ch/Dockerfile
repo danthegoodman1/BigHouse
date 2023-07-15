@@ -1,4 +1,4 @@
-FROM clickhouse/clickhouse-server:23.3.8
+FROM clickhouse/clickhouse-server:23.6
 
 RUN apt update
 RUN apt install gettext-base -y
