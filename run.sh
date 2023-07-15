@@ -15,3 +15,5 @@ done
 echo "Cluster bootstrapped, executing query"
 output=$(docker exec -it bighouse-ch-1-1 clickhouse-client -q "select * from s3Cluster('randomclustername', 'https://datasets-documentation.s3.eu-west-3.amazonaws.com/aapl_stock.csv', 'CSVWithNames') LIMIT 5")
 echo $output
+
+docker compose down
