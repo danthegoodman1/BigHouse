@@ -2,7 +2,8 @@ docker compose up --build -d
 
 # Wait until cluster is bootstrapped
 while true; do
-  output=$(docker exec -it bighouse-ch-1-1 clickhouse-client -q "select count() from system.clusters where cluster = 'randomclustername' FORMAT TabSeparatedRaw")
+  # output=$(docker exec -it bighouse-ch-1-1 clickhouse-client -q "select count() from system.clusters where cluster = 'randomclustername' FORMAT TabSeparatedRaw")
+  output=$(docker exec -it bighouse-ch-1-1 clickhouse-client -q "select 3 from system.zookeeper where path='/clickhouse/task_queue/'")
   status=$?
 
   # Break the loop if the status code is 1 or the output equals 3

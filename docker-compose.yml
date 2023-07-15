@@ -11,8 +11,8 @@ services:
     depends_on:
       - zk
     environment:
-      - ZH_HOST_1=zh
-      - ZH_PORT_1=2181
+      - ZK_HOST_1=zk
+      - ZK_PORT_1=2181
       - REMOTE_REPLICAS="<replica>\\n        <host>ch-1</host>\\n        <port>9000</port>\\n    </replica>\\n    <replica>\\n        <host>ch-2</host>\\n        <port>9000</port>\\n    </replica>\\n    <replica>\\n        <host>ch-3</host>\\n        <port>9000</port>\\n    </replica>"
       - SHARD=shard1
       - CLUSTER=randomclustername
@@ -22,8 +22,8 @@ services:
     depends_on:
       - zk
     environment:
-      - ZH_HOST_1=zh
-      - ZH_PORT_1=2181
+      - ZK_HOST_1=zk
+      - ZK_PORT_1=2181
       - REMOTE_REPLICAS="<replica>\\n        <host>ch-1</host>\\n        <port>9000</port>\\n    </replica>\\n    <replica>\\n        <host>ch-2</host>\\n        <port>9000</port>\\n    </replica>\\n    <replica>\\n        <host>ch-3</host>\\n        <port>9000</port>\\n    </replica>"
       - SHARD=shard1
       - CLUSTER=randomclustername
@@ -33,8 +33,8 @@ services:
     depends_on:
       - zk
     environment:
-      - ZH_HOST_1=zh
-      - ZH_PORT_1=2181
+      - ZK_HOST_1=zk
+      - ZK_PORT_1=2181
       - REMOTE_REPLICAS="<replica>\\n        <host>ch-1</host>\\n        <port>9000</port>\\n    </replica>\\n    <replica>\\n        <host>ch-2</host>\\n        <port>9000</port>\\n    </replica>\\n    <replica>\\n        <host>ch-3</host>\\n        <port>9000</port>\\n    </replica>"
       - SHARD=shard1
       - CLUSTER=randomclustername
