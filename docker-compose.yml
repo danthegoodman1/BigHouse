@@ -1,11 +1,7 @@
 version: '3'
 services:
   zk:
-    image: 'zookeeper:latest'
-    environment:
-      - ALLOW_ANONYMOUS_LOGIN=yes
-    ports:
-      - '2181:2181'
+    image: 'clickhouse/clickhouse-keeper:latest'
   ch-1:
     build: ./ch
     depends_on:
