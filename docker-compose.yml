@@ -1,0 +1,41 @@
+version: '3'
+services:
+  zk:
+    image: 'zookeeper:latest'
+    environment:
+      - ALLOW_ANONYMOUS_LOGIN=yes
+    ports:
+      - '2181:2181'
+  ch-1:
+    build: ./ch
+    depends_on:
+      - zk
+    environment:
+      - ZH_HOST_1=zh
+      - ZH_PORT_1=2181
+      - REMOTE_REPLICAS="<replica>\\n        <host>ch-1</host>\\n        <port>9000</port>\\n    </replica>\\n    <replica>\\n        <host>ch-2</host>\\n        <port>9000</port>\\n    </replica>\\n    <replica>\\n        <host>ch-3</host>\\n        <port>9000</port>\\n    </replica>"
+      - SHARD=shard1
+      - CLUSTER=randomclustername
+      - REPLICA=ch-1
+  ch-2:
+    build: ./ch
+    depends_on:
+      - zk
+    environment:
+      - ZH_HOST_1=zh
+      - ZH_PORT_1=2181
+      - REMOTE_REPLICAS="<replica>\\n        <host>ch-1</host>\\n        <port>9000</port>\\n    </replica>\\n    <replica>\\n        <host>ch-2</host>\\n        <port>9000</port>\\n    </replica>\\n    <replica>\\n        <host>ch-3</host>\\n        <port>9000</port>\\n    </replica>"
+      - SHARD=shard1
+      - CLUSTER=randomclustername
+      - REPLICA=ch-2
+  ch-3:
+    build: ./ch
+    depends_on:
+      - zk
+    environment:
+      - ZH_HOST_1=zh
+      - ZH_PORT_1=2181
+      - REMOTE_REPLICAS="<replica>\\n        <host>ch-1</host>\\n        <port>9000</port>\\n    </replica>\\n    <replica>\\n        <host>ch-2</host>\\n        <port>9000</port>\\n    </replica>\\n    <replica>\\n        <host>ch-3</host>\\n        <port>9000</port>\\n    </replica>"
+      - SHARD=shard1
+      - CLUSTER=randomclustername
+      - REPLICA=ch-3
