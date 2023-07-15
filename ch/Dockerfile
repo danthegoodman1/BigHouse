@@ -1,7 +1,6 @@
-FROM clickhouse/clickhouse-server:23.6
+FROM clickhouse/clickhouse-server:23.6-alpine
 
-RUN apt update
-RUN apt install gettext-base -y
+RUN apk add envsubst
 
 COPY ./config.xml /etc/clickhouse-server/temp-config.xml
 
