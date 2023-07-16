@@ -80,7 +80,7 @@ func doFlyMachineReq(ctx context.Context, path string, body []byte) (*FlyMachine
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", utils.FLY_API_TOKEN)
+	req.Header.Set("Authorization", "Bearer "+utils.FLY_API_TOKEN)
 
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -109,8 +109,9 @@ func CreateMinimalCHMachine(ctx context.Context, name string) (*FlyMachine, erro
 	fm, err := doFlyMachineReq(ctx, "/machines", []byte(fmt.Sprintf(`
 		{
 		  "name": "%s",
+		  "size": "performance-2x",
 		  "config": {
-			"image": "clickhouse/clickhouse-server:23.6"
+			"image": "registry.fly.io/test-bighouse"
 		  }
 		}
 	`, name)))
@@ -125,7 +126,7 @@ func UpdateFlyCHMachine(ctx context.Context, id, name, keeperHost, keeperPort, r
 	jBytes, err := json.Marshal(map[string]any{
 		"name": name,
 		"config": map[string]any{
-			"image": "clickhouse/clickhouse-server:23.6",
+			"image": "registry.fly.io/test-bighouse",
 			"size":  "performance-2x",
 			"env": map[string]any{
 				"ZK_HOST_1":       keeperHost,

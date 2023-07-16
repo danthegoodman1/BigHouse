@@ -42,7 +42,7 @@ func execActivity[Tin any](ctx workflow.Context, activity func(ctx context.Conte
 
 func execLocalActivityIO[Tin any, Tout any](ctx workflow.Context, activity func(ctx context.Context, params Tin) (res Tout, err error), input Tin, scheduleToClose time.Duration) (Tout, error) {
 	if scheduleToClose != 0 {
-		ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		ctx = workflow.WithLocalActivityOptions(ctx, workflow.LocalActivityOptions{
 			ScheduleToCloseTimeout: scheduleToClose,
 		})
 	}
@@ -57,7 +57,7 @@ func execLocalActivityIO[Tin any, Tout any](ctx workflow.Context, activity func(
 
 func execLocalActivity[Tin any](ctx workflow.Context, activity func(ctx context.Context, params Tin) (err error), input Tin, scheduleToClose time.Duration) error {
 	if scheduleToClose != 0 {
-		ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		ctx = workflow.WithLocalActivityOptions(ctx, workflow.LocalActivityOptions{
 			ScheduleToCloseTimeout: scheduleToClose,
 		})
 	}

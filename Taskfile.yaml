@@ -19,6 +19,10 @@ tasks:
       # task single-test -- ./emailing -run TestSendEmail
       # - go test --count=1 -v ./... -run {{.CLI_ARGS}}
       # task single-test -- TestName
+  docker:
+    cmds:
+      - cd ch && docker build -t registry.fly.io/test-bighouse .
+      - docker push registry.fly.io/test-bighouse
 
   install-deps:
     cmds:

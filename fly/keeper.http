@@ -1,0 +1,22 @@
+### Create a machine
+POST https://api.machines.dev/v1/apps/test-bighouse/machines
+Content-Type: application/json
+Authorization: Bearer xxx
+
+{
+  "name": "keeper-0",
+  "config": {
+    "image": "clickhouse/clickhouse-keeper:latest",
+    "services": [
+      {
+        "ports": [
+          {
+            "port": 2181
+          }
+        ],
+        "protocol": "tcp",
+        "internal_port": 2181
+      }
+    ]
+  }
+}

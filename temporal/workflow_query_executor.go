@@ -50,6 +50,8 @@ func QueryExecutor(ctx workflow.Context, input QueryExecutorInput) (*QueryExecut
 		return nil, fmt.Errorf("error in SpawnNodes: %w", err)
 	}
 
+	logger.Debug().Interface("createdNodes", createdNodes).Msg("created nodes")
+
 	// TODO: Execute query on cluster, upload results to s3
 	// TODO: launch child workflow to clean up nodes?
 	// TODO: Return S3 url
@@ -69,7 +71,7 @@ func (ac *QueryExecutorActivities) GetKeeperInfo(ctx context.Context, input GetK
 	logger := zerolog.Ctx(ctx)
 	logger.Debug().Msg("getting keeper info")
 	return &KeeperInfo{
-		KeeperURL: "",
+		KeeperURL: "e2865516b74998.vm.test-bighouse.internal",
 		Cluster:   utils.GenRandomID(""),
 	}, nil
 }
@@ -81,7 +83,7 @@ type (
 		KeeperHost, Cluster string
 	}
 	SpawnedNodes struct {
-		IDs []string
+		Machines []*fly.FlyMachine
 	}
 
 	AsyncFlyMachine struct {
@@ -135,12 +137,12 @@ func (ac *QueryExecutorActivities) SpawnNodes(ctx context.Context, input SpawnNo
 	uc := make(chan AsyncFlyMachine, len(readyMachines))
 	tc, cancel = context.WithTimeout(ctx, input.Timeout)
 	for i, readyMachine := range readyMachines {
-		go func(ctx context.Context, readymachine *fly.FlyMachine, c chan AsyncFlyMachine, i int) {
+		go func(ctx context.Context, readyMachine *fly.FlyMachine, c chan AsyncFlyMachine, i int) {
 			machine, err := fly.UpdateFlyCHMachine(ctx, readyMachine.Id, readyMachine.Name, input.KeeperHost, "9000", remoteReplicas, shard, input.Cluster, fmt.Sprintf("%s-%d", input.Cluster, i))
 			if err != nil {
 				logger.Error().Err(err).Str("machineID", machine.Id).Msg("error updating fly machine")
 			}
-			rc <- AsyncFlyMachine{
+			c <- AsyncFlyMachine{
 				Err:     err,
 				Machine: machine,
 			}
@@ -155,10 +157,12 @@ func (ac *QueryExecutorActivities) SpawnNodes(ctx context.Context, input SpawnNo
 	}
 
 	// TODO: Check that % finished by the deadline
-	updatedMachines := lo.FilterMap(responses, func(item AsyncFlyMachine, index int) (*fly.FlyMachine, bool) {
+	updatedMachines := lo.FilterMap(updateResponses, func(item AsyncFlyMachine, index int) (*fly.FlyMachine, bool) {
 		return item.Machine, item.Err == nil
 	})
 	logger.Debug().Msgf("%d/%d nodes updated", len(updatedMachines), input.NumNodes)
 
 	// TODO: Keep pinging nodes until they are ready
+
+	return &SpawnedNodes{Machines: updatedMachines}, nil
 }
