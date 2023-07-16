@@ -13,10 +13,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/danthegoodman1/BigHouse/crdb"
 	"github.com/danthegoodman1/BigHouse/gologger"
 	"github.com/danthegoodman1/BigHouse/http_server"
-	"github.com/danthegoodman1/BigHouse/migrations"
 	"github.com/danthegoodman1/BigHouse/utils"
 )
 
@@ -32,25 +30,27 @@ func main() {
 	}
 	logger.Debug().Msg("starting Tangia mono api")
 
-	if err := crdb.ConnectToDB(); err != nil {
-		logger.Error().Err(err).Msg("error connecting to CRDB")
-		os.Exit(1)
-	}
+	// if err := crdb.ConnectToDB(); err != nil {
+	// 	logger.Error().Err(err).Msg("error connecting to CRDB")
+	// 	os.Exit(1)
+	// }
 
-	err := migrations.CheckMigrations(utils.CRDB_DSN)
-	if err != nil {
-		logger.Error().Err(err).Msg("Error checking migrations")
-		os.Exit(1)
-	}
+	// err := migrations.CheckMigrations(utils.CRDB_DSN)
+	// if err != nil {
+	// 	logger.Error().Err(err).Msg("Error checking migrations")
+	// 	os.Exit(1)
+	// }
 
 	prometheusReporter := observability.NewPrometheusReporter()
-	err = observability.StartInternalHTTPServer(":8042", prometheusReporter)
-	if err != nil && !errors.Is(err, http.ErrServerClosed) {
-		logger.Error().Err(err).Msg("internal server couldn't start")
-		os.Exit(1)
-	}
+	go func() {
+		err := observability.StartInternalHTTPServer(":8042", prometheusReporter)
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error().Err(err).Msg("internal server couldn't start")
+			os.Exit(1)
+		}
+	}()
 
-	err = temporal.Run(context.Background(), prometheusReporter)
+	err := temporal.Run(context.Background(), prometheusReporter)
 	if err != nil {
 		logger.Error().Err(err).Msg("Temporal init error")
 		os.Exit(1)
@@ -62,6 +62,8 @@ func main() {
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	<-c
 	logger.Warn().Msg("received shutdown signal!")
+
+	temporal.Stop()
 
 	// For AWS ALB needing some time to de-register pod
 	// Convert the time to seconds
