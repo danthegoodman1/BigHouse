@@ -1,8 +1,5 @@
 <clickhouse>
     <listen_host>::</listen_host>
-    <listen_host>0.0.0.0</listen_host>
-    <interserver_listen_host>::</interserver_listen_host>
-    <interserver_listen_host>0.0.0.0</interserver_listen_host>
 
     <logger>
         <!-- Possible levels [1]:
@@ -33,7 +30,7 @@
     <max_connections>4096</max_connections>
 
     <keeper_server>
-        <tcp_port>9181</tcp_port>
+        <tcp_port>2181</tcp_port>
 
         <!-- Must be unique among all keeper serves -->
         <server_id>1</server_id>

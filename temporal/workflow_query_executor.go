@@ -71,8 +71,8 @@ func (ac *QueryExecutorActivities) GetKeeperInfo(ctx context.Context, input GetK
 	logger := zerolog.Ctx(ctx)
 	logger.Debug().Msg("getting keeper info")
 	return &KeeperInfo{
-		KeeperURL: "91851d9c166d78.vm.test-bighouse-keeper.internal",
-		Cluster:   utils.GenRandomID(""),
+		KeeperURL: "3d8d99eda2e748.vm.test-bighouse-keeper.internal",
+		Cluster:   utils.GenRandomAlpha(""),
 	}, nil
 }
 
@@ -138,7 +138,7 @@ func (ac *QueryExecutorActivities) SpawnNodes(ctx context.Context, input SpawnNo
 	tc, cancel = context.WithTimeout(ctx, input.Timeout)
 	for i, readyMachine := range readyMachines {
 		go func(ctx context.Context, readyMachine *fly.FlyMachine, c chan AsyncFlyMachine, i int) {
-			machine, err := fly.UpdateFlyCHMachine(ctx, readyMachine.Id, readyMachine.Name, input.KeeperHost, "9000", remoteReplicas, shard, input.Cluster, fmt.Sprintf("%s-%d", input.Cluster, i))
+			machine, err := fly.UpdateFlyCHMachine(ctx, readyMachine.Id, readyMachine.Name, input.KeeperHost, "2181", remoteReplicas, shard, input.Cluster, fmt.Sprintf("%s-%d", input.Cluster, i))
 			if err != nil {
 				logger.Error().Err(err).Str("machineID", machine.Id).Msg("error updating fly machine")
 			}

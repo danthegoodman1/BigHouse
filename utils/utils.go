@@ -68,6 +68,10 @@ func GenRandomID(prefix string) string {
 	return prefix + gonanoid.MustGenerate("abcdefghijklmonpqrstuvwxyzABCDEFGHIJKLMONPQRSTUVWXYZ0123456789", 22)
 }
 
+func GenRandomAlpha(prefix string) string {
+	return prefix + gonanoid.MustGenerate("abcdefghijklmonpqrstuvwxyz", 22)
+}
+
 func GenKSortedID(prefix string) string {
 	return prefix + ksuid.New().String()
 }

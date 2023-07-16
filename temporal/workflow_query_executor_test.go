@@ -36,7 +36,7 @@ func (s *UnitTestSuite) TestQueryExecutorWorkflow() {
 
 	s.env.ExecuteWorkflow(QueryExecutor, QueryExecutorInput{
 		NumNodes: 3,
-		Query:    "select * from numbers limit 10select * from urlCluster('{cluster}', 'https://datasets-documentation.s3.eu-west-3.amazonaws.com/aapl_stock.csv', 'CSVWithNames') LIMIT 5",
+		Query:    "select * from urlCluster('{cluster}', 'https://datasets-documentation.s3.eu-west-3.amazonaws.com/aapl_stock.csv', 'CSVWithNames') LIMIT 5",
 	})
 
 	s.True(s.env.IsWorkflowCompleted())
