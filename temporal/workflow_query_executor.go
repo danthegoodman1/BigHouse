@@ -71,7 +71,7 @@ func (ac *QueryExecutorActivities) GetKeeperInfo(ctx context.Context, input GetK
 	logger := zerolog.Ctx(ctx)
 	logger.Debug().Msg("getting keeper info")
 	return &KeeperInfo{
-		KeeperURL: "e286551ec79e38.vm.test-bighouse-keeper.internal",
+		KeeperURL: "91851d9c166d78.vm.test-bighouse-keeper.internal",
 		Cluster:   utils.GenRandomID(""),
 	}, nil
 }

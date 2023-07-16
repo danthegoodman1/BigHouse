@@ -1,5 +1,9 @@
 <clickhouse>
     <listen_host>::</listen_host>
+    <listen_host>0.0.0.0</listen_host>
+    <interserver_listen_host>::</interserver_listen_host>
+    <interserver_listen_host>0.0.0.0</interserver_listen_host>
+
     <logger>
         <!-- Possible levels [1]:
 
