@@ -16,15 +16,6 @@ Authorization: Bearer xxx
         ],
         "protocol": "tcp",
         "internal_port": 2181
-      },
-      {
-        "ports": [
-          {
-            "port": 9181
-          }
-        ],
-        "protocol": "tcp",
-        "internal_port": 9181
       }
     ]
   }
