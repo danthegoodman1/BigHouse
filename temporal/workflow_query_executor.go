@@ -162,31 +162,3 @@ func (ac *QueryExecutorActivities) SpawnNodes(ctx context.Context, input SpawnNo
 
 	// TODO: Keep pinging nodes until they are ready
 }
-
-type (
-	FormatEnvVarsInput struct {
-		IDs                []string
-		KeeperURL, Cluster string
-	}
-
-	FormattedEnvVars struct {
-		Shard, RemoteReplicas string
-		Replicas              []string
-	}
-)
-
-func (ac *QueryExecutorActivities) FormatEnvVars(ctx context.Context, input FormatEnvVarsInput) (*FormattedEnvVars, error) {
-	logger := zerolog.Ctx(ctx)
-	logger.Debug().Msg("formatting env vars")
-
-	out := &FormattedEnvVars{
-		Shard:    "1",
-		Replicas: nil,
-	}
-
-	for _, nodeHost := range input.NodeHosts {
-		out.RemoteReplicas += fmt.Sprintf("<replica><host>%s</host><port>9000</port></replica>", nodeHost)
-	}
-
-	return out, nil
-}
