@@ -1,12 +1,12 @@
 ### Create a machine
-POST https://api.machines.dev/v1/apps/test-bighouse/machines
+POST https://api.machines.dev/v1/apps/test-bighouse-keeper/machines
 Content-Type: application/json
 Authorization: Bearer xxx
 
 {
   "name": "keeper-0",
   "config": {
-    "image": "clickhouse/clickhouse-keeper:latest",
+    "image": "registry.fly.io/test-bighouse-keeper",
     "services": [
       {
         "ports": [

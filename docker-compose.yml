@@ -1,7 +1,7 @@
 version: '3'
 services:
   zk:
-    image: 'clickhouse/clickhouse-keeper:latest'
+    build: ./keeper
   ch-1:
     build: ./ch
     depends_on:

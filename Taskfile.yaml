@@ -24,6 +24,11 @@ tasks:
       - cd ch && docker build -t registry.fly.io/test-bighouse .
       - docker push registry.fly.io/test-bighouse
 
+  keeper:
+    cmds:
+      - cd keeper && docker build -t registry.fly.io/test-bighouse-keeper .
+      - docker push registry.fly.io/test-bighouse-keeper
+
   install-deps:
     cmds:
     - go install github.com/rubenv/sql-migrate/...@{{.sql_migrate_version}}
