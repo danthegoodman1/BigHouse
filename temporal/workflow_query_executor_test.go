@@ -25,20 +25,24 @@ func (s *UnitTestSuite) AfterTest(suiteName, testName string) {
 	s.env.AssertExpectations(s.T())
 }
 
-func TestWorkflowExample(t *testing.T) {
+func TestQueryExecutorWorkflow(t *testing.T) {
 	suite.Run(t, new(UnitTestSuite))
 }
 
-func (s *UnitTestSuite) TestWorkflowExample() {
-	var ac *WorkflowExampleActivities
-	s.env.RegisterActivity(ac.DoubleNumber)
+func (s *UnitTestSuite) TestQueryExecutorWorkflow() {
+	var ac *QueryExecutorActivities
+	s.env.RegisterActivity(ac.SpawnNodes)
+	s.env.RegisterActivity(ac.GetKeeperInfo)
 
-	s.env.ExecuteWorkflow(WorkflowExample, WorkflowExampleInput{Num: 2})
+	s.env.ExecuteWorkflow(QueryExecutor, QueryExecutorInput{
+		NumNodes: 3,
+		Query:    "select * from urlCluster('{cluster}', 'https://datasets-documentation.s3.eu-west-3.amazonaws.com/aapl_stock.csv', 'CSVWithNames') LIMIT 5",
+	})
 
 	s.True(s.env.IsWorkflowCompleted())
 	s.NoError(s.env.GetWorkflowError(), "workflow errored")
 
-	var result WorkflowExampleOutput
+	var result QueryExecutorOutput
 	s.NoError(s.env.GetWorkflowResult(&result))
-	fmt.Printf("Got result %d * 2 = %d\n", 2, result.DoubleNum)
+	fmt.Printf("Workflow result: %+v\n", result)
 }

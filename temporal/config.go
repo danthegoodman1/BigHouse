@@ -51,6 +51,7 @@ const (
 var ErrSignalTimeout = errors.New("timeout waiting for signal")
 
 func Run(ctx context.Context, reporter prometheus.Reporter) error {
+	globalLogger.Debug().Msg("starting temporal workers")
 	tracingInterceptor, err := opentelemetry.NewTracingInterceptor(opentelemetry.TracerOptions{})
 	if err != nil {
 		return err
@@ -59,7 +60,7 @@ func Run(ctx context.Context, reporter prometheus.Reporter) error {
 		CachedReporter:  reporter,
 		Separator:       prometheus.DefaultSeparator,
 		SanitizeOptions: &sdktally.PrometheusSanitizeOptions,
-		Prefix:          "tangia",
+		Prefix:          "default",
 	}
 	scope, _ := tally.NewRootScope(scopeOpts, time.Second)
 	scope = sdktally.NewPrometheusNamingScope(scope)
@@ -71,10 +72,7 @@ func Run(ctx context.Context, reporter prometheus.Reporter) error {
 		FailureConverter:   permFailureConverter{base: temporal.GetDefaultFailureConverter()},
 	}
 
-	if utils.Env != "LOCAL" {
-		options.HostPort = "temporal-frontend.temporal.svc.cluster.local:7233"
-		options.Namespace = "tangia"
-	}
+	options.HostPort = utils.TEMPORAL_URL
 
 	c, err := client.Dial(options)
 	if err != nil {
@@ -116,6 +114,7 @@ func Run(ctx context.Context, reporter prometheus.Reporter) error {
 		return fmt.Errorf("error in temporal health-check: %w", err)
 	}
 
+	globalLogger.Debug().Msg("temporal workers started")
 	return nil
 }
 
@@ -141,6 +140,8 @@ func Stop() {
 	for _, w := range workers {
 		w.Stop()
 	}
+	tClient.Close()
+	globalLogger.Debug().Msg("stopped all temporal workers")
 }
 
 func healthCheck(ctx context.Context) error {

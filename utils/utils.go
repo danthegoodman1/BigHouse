@@ -55,8 +55,21 @@ func GetEnvOrDefaultInt(env string, defaultVal int64) int64 {
 	}
 }
 
+func MustEnv(env string) string {
+	e := os.Getenv(env)
+	if e == "" {
+		panic(fmt.Sprintf("Missing env var '%s'", env))
+	} else {
+		return e
+	}
+}
+
 func GenRandomID(prefix string) string {
 	return prefix + gonanoid.MustGenerate("abcdefghijklmonpqrstuvwxyzABCDEFGHIJKLMONPQRSTUVWXYZ0123456789", 22)
+}
+
+func GenRandomAlpha(prefix string) string {
+	return prefix + gonanoid.MustGenerate("abcdefghijklmonpqrstuvwxyz", 22)
 }
 
 func GenKSortedID(prefix string) string {

@@ -205,7 +205,10 @@
          - users without password have readonly access.
          See also: https://www.shodan.io/search?query=clickhouse
       -->
-    <!-- <listen_host>::</listen_host> -->
+     <listen_host>::</listen_host>
+<!--     <listen_host>0.0.0.0</listen_host>-->
+     <interserver_listen_host>::</interserver_listen_host>
+<!--     <interserver_listen_host>0.0.0.0</interserver_listen_host>-->
 
 
     <!-- Same for hosts without support for IPv6: -->
