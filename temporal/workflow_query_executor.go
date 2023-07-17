@@ -71,7 +71,7 @@ func (ac *QueryExecutorActivities) GetKeeperInfo(ctx context.Context, input GetK
 	logger := zerolog.Ctx(ctx)
 	logger.Debug().Msg("getting keeper info")
 	return &KeeperInfo{
-		KeeperURL: "3d8d99eda2e748.vm.test-bighouse-keeper.internal",
+		KeeperURL: "287436db300158.vm.test-bighouse-keeper.internal",
 		Cluster:   utils.GenRandomAlpha(""),
 	}, nil
 }
@@ -95,16 +95,25 @@ type (
 func (ac *QueryExecutorActivities) SpawnNodes(ctx context.Context, input SpawnNodesInput) (*SpawnedNodes, error) {
 	logger := zerolog.Ctx(ctx)
 	rc := make(chan AsyncFlyMachine, input.NumNodes)
-	namePrefix := utils.GenRandomShortID()
+	namePrefix := utils.GenRandomAlpha("")
 	tc, cancel := context.WithTimeout(ctx, input.Timeout)
 	defer cancel()
 
 	var responses []AsyncFlyMachine
 
+	remoteReplicas := ""
+	for i := 0; i < input.NumNodes; i++ {
+		nodeName := fmt.Sprintf("%s-%d", namePrefix, i)
+		remoteReplicas += fmt.Sprintf("<replica><host>%s.name.kv._metadata.%s.internal</host><port>9000</port></replica>", nodeName, utils.FLY_APP)
+	}
+
+	shard := utils.GenRandomShortID()
+
 	// Create machines
 	for i := 0; i < input.NumNodes; i++ {
 		go func(ctx context.Context, c chan AsyncFlyMachine, i int) {
-			machine, err := fly.CreateMinimalCHMachine(ctx, fmt.Sprintf("%s-%d", namePrefix, i))
+			nodeName := fmt.Sprintf("%s-%d", namePrefix, i)
+			machine, err := fly.CreateFullCHMachine(ctx, nodeName, input.KeeperHost, "2181", remoteReplicas, shard, input.Cluster, nodeName)
 			if err != nil {
 				logger.Error().Err(err).Int("index", i).Msg("error spawning fly machine")
 			}
@@ -127,42 +136,7 @@ func (ac *QueryExecutorActivities) SpawnNodes(ctx context.Context, input SpawnNo
 	})
 	logger.Debug().Msgf("%d/%d nodes created", len(readyMachines), input.NumNodes)
 
-	remoteReplicas := ""
-	for _, readyMachine := range readyMachines {
-		remoteReplicas += fmt.Sprintf("<replica><host>%s.vm.%s.internal</host><port>9000</port></replica>", readyMachine.Id, utils.FLY_APP)
-	}
-	shard := utils.GenRandomShortID()
-
-	// Update the nodes
-	uc := make(chan AsyncFlyMachine, len(readyMachines))
-	tc, cancel = context.WithTimeout(ctx, input.Timeout)
-	for i, readyMachine := range readyMachines {
-		go func(ctx context.Context, readyMachine *fly.FlyMachine, c chan AsyncFlyMachine, i int) {
-			machine, err := fly.UpdateFlyCHMachine(ctx, readyMachine.Id, readyMachine.Name, input.KeeperHost, "2181", remoteReplicas, shard, input.Cluster, fmt.Sprintf("%s-%d", input.Cluster, i))
-			if err != nil {
-				logger.Error().Err(err).Str("machineID", machine.Id).Msg("error updating fly machine")
-			}
-			c <- AsyncFlyMachine{
-				Err:     err,
-				Machine: machine,
-			}
-		}(tc, readyMachine, uc, i)
-	}
-
-	// Collect responses
-	var updateResponses []AsyncFlyMachine
-	for i := 0; i < input.NumNodes; i++ {
-		res := <-uc
-		updateResponses = append(updateResponses, res)
-	}
-
-	// TODO: Check that % finished by the deadline
-	updatedMachines := lo.FilterMap(updateResponses, func(item AsyncFlyMachine, index int) (*fly.FlyMachine, bool) {
-		return item.Machine, item.Err == nil
-	})
-	logger.Debug().Msgf("%d/%d nodes updated", len(updatedMachines), input.NumNodes)
-
 	// TODO: Keep pinging nodes until they are ready
 
-	return &SpawnedNodes{Machines: updatedMachines}, nil
+	return &SpawnedNodes{Machines: readyMachines}, nil
 }

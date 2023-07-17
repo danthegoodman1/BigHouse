@@ -136,6 +136,9 @@ func UpdateFlyCHMachine(ctx context.Context, id, name, keeperHost, keeperPort, r
 				"CLUSTER":         cluster,
 				"REPLICA":         replica,
 			},
+			"metadata": map[string]any{
+				"name": name,
+			},
 			"services": []map[string]any{
 				{
 					"ports": []map[string]int{
@@ -162,6 +165,56 @@ func UpdateFlyCHMachine(ctx context.Context, id, name, keeperHost, keeperPort, r
 		return nil, fmt.Errorf("error in json.Marshal: %w", err)
 	}
 	fm, err := doFlyMachineReq(ctx, "/machines/"+id, jBytes)
+	if err != nil {
+		return nil, fmt.Errorf("error in doFlyMachineReq: %w", err)
+	}
+
+	return fm, nil
+}
+
+func CreateFullCHMachine(ctx context.Context, name, keeperHost, keeperPort, remoteReplicas, shard, cluster, replica string) (*FlyMachine, error) {
+	jBytes, err := json.Marshal(map[string]any{
+		"name": name,
+		"config": map[string]any{
+			"image": "registry.fly.io/test-bighouse",
+			"size":  "performance-2x",
+			"env": map[string]any{
+				"ZK_HOST_1":       keeperHost,
+				"ZK_PORT_1":       keeperPort,
+				"REMOTE_REPLICAS": remoteReplicas,
+				"SHARD":           shard,
+				"CLUSTER":         cluster,
+				"REPLICA":         replica,
+			},
+			"metadata": map[string]any{
+				"name": name,
+			},
+			"services": []map[string]any{
+				{
+					"ports": []map[string]int{
+						{
+							"port": 9000,
+						},
+					},
+					"protocol":      "tcp",
+					"internal_port": 9000,
+				},
+				{
+					"ports": []map[string]int{
+						{
+							"port": 8123,
+						},
+					},
+					"protocol":      "tcp",
+					"internal_port": 8123,
+				},
+			},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("error in json.Marshal: %w", err)
+	}
+	fm, err := doFlyMachineReq(ctx, "/machines", jBytes)
 	if err != nil {
 		return nil, fmt.Errorf("error in doFlyMachineReq: %w", err)
 	}
