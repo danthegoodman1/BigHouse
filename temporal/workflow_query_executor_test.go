@@ -44,7 +44,7 @@ func (s *UnitTestSuite) TestQueryExecutorWorkflow() {
 	`
 	bigStmt = bigStmt
 
-	smallStmt := `SELECT count(), _file FROM url('https://datasets-documentation.s3.eu-west-3.amazonaws.com/house_parquet/house_{0,1}.parquet') GROUP BY _file LIMIT 10`
+	smallStmt := `SELECT count(), _file FROM s3Cluster('{cluster}', 'https://datasets-documentation.s3.eu-west-3.amazonaws.com/house_parquet/house_{0,1}.parquet') GROUP BY _file LIMIT 10`
 	smallStmt = smallStmt
 
 	s.env.ExecuteWorkflow(QueryExecutor, QueryExecutorInput{
