@@ -73,13 +73,15 @@ var (
 	ErrFlyHighStatusCode = errors.New("fly high status code")
 )
 
-func doFlyMachineReq(ctx context.Context, path string, body []byte) (*FlyMachine, error) {
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://api.machines.dev/v1/apps/%s%s", utils.FLY_APP, path), bytes.NewReader(body))
+func doFlyMachineReq(ctx context.Context, path, method string, body []byte) (*FlyMachine, error) {
+	req, err := http.NewRequestWithContext(ctx, method, fmt.Sprintf("https://api.machines.dev/v1/apps/%s%s", utils.FLY_APP, path), bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("error in http.NewRequest: %w", err)
 	}
 
-	req.Header.Set("Content-Type", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	req.Header.Set("Authorization", "Bearer "+utils.FLY_API_TOKEN)
 
 	res, err := http.DefaultClient.Do(req)
@@ -106,7 +108,7 @@ func doFlyMachineReq(ctx context.Context, path string, body []byte) (*FlyMachine
 }
 
 func CreateMinimalCHMachine(ctx context.Context, name string) (*FlyMachine, error) {
-	fm, err := doFlyMachineReq(ctx, "/machines", []byte(fmt.Sprintf(`
+	fm, err := doFlyMachineReq(ctx, "/machines", "POST", []byte(fmt.Sprintf(`
 		{
 		  "name": "%s",
 		  "size": "performance-2x",
@@ -164,7 +166,7 @@ func UpdateFlyCHMachine(ctx context.Context, id, name, keeperHost, keeperPort, r
 	if err != nil {
 		return nil, fmt.Errorf("error in json.Marshal: %w", err)
 	}
-	fm, err := doFlyMachineReq(ctx, "/machines/"+id, jBytes)
+	fm, err := doFlyMachineReq(ctx, "/machines/"+id, "POST", jBytes)
 	if err != nil {
 		return nil, fmt.Errorf("error in doFlyMachineReq: %w", err)
 	}
@@ -214,10 +216,15 @@ func CreateFullCHMachine(ctx context.Context, name, keeperHost, keeperPort, remo
 	if err != nil {
 		return nil, fmt.Errorf("error in json.Marshal: %w", err)
 	}
-	fm, err := doFlyMachineReq(ctx, "/machines", jBytes)
+	fm, err := doFlyMachineReq(ctx, "/machines", "POST", jBytes)
 	if err != nil {
 		return nil, fmt.Errorf("error in doFlyMachineReq: %w", err)
 	}
 
 	return fm, nil
+}
+
+func DeleteFlyMachine(ctx context.Context, id string) error {
+	_, err := doFlyMachineReq(ctx, "/machines/"+id+"?force=true", "DELETE", nil)
+	return err
 }

@@ -2,12 +2,18 @@ package temporal
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/danthegoodman1/BigHouse/fly"
 	"github.com/danthegoodman1/BigHouse/utils"
+	"github.com/miekg/dns"
 	"github.com/rs/zerolog"
 	"github.com/samber/lo"
 	"go.temporal.io/sdk/workflow"
+	"golang.org/x/sync/errgroup"
+	"strings"
 	"time"
 )
 
@@ -41,7 +47,7 @@ func QueryExecutor(ctx workflow.Context, input QueryExecutorInput) (*QueryExecut
 
 	// Create nodes and boostrap the cluster
 	createdNodes, err := execLocalActivityIO(ctx, ac.SpawnNodes, SpawnNodesInput{
-		NumNodes:   3,
+		NumNodes:   input.NumNodes,
 		Timeout:    time.Second * 15,
 		KeeperHost: keeperInfo.KeeperURL,
 		Cluster:    keeperInfo.Cluster,
@@ -50,7 +56,25 @@ func QueryExecutor(ctx workflow.Context, input QueryExecutorInput) (*QueryExecut
 		return nil, fmt.Errorf("error in SpawnNodes: %w", err)
 	}
 
-	logger.Debug().Interface("createdNodes", createdNodes).Msg("created nodes")
+	logger.Debug().Msg("created nodes")
+
+	defer func() {
+		// Clean nodes
+		err = execLocalActivity(ctx, ac.DeleteNodes, DeleteNodesInput{IDs: lo.Map(createdNodes.Machines, func(item *fly.FlyMachine, index int) string {
+			return item.Id
+		})}, time.Minute)
+		if err != nil {
+			logger.Error().Err(err).Msg("error deleting nodes")
+		}
+	}()
+
+	// Wait for nodes to be ready
+	logger.Debug().Msg("waiting for ch ready...")
+	err = execLocalActivity(ctx, ac.WaitForCHReady, *createdNodes, time.Minute)
+	if err != nil {
+		return nil, fmt.Errorf("error in WaitForCHReady: %w", err)
+	}
+	logger.Debug().Msg("CH nodes ready!")
 
 	// TODO: Execute query on cluster, upload results to s3
 	// TODO: launch child workflow to clean up nodes?
@@ -71,7 +95,7 @@ func (ac *QueryExecutorActivities) GetKeeperInfo(ctx context.Context, input GetK
 	logger := zerolog.Ctx(ctx)
 	logger.Debug().Msg("getting keeper info")
 	return &KeeperInfo{
-		KeeperURL: "287436db300158.vm.test-bighouse-keeper.internal",
+		KeeperURL: "3d8d99eda22068.vm.test-bighouse-keeper.internal",
 		Cluster:   utils.GenRandomAlpha(""),
 	}, nil
 }
@@ -139,4 +163,115 @@ func (ac *QueryExecutorActivities) SpawnNodes(ctx context.Context, input SpawnNo
 	// TODO: Keep pinging nodes until they are ready
 
 	return &SpawnedNodes{Machines: readyMachines}, nil
+}
+
+// TODO: optimize input
+func (ac *QueryExecutorActivities) WaitForCHReady(ctx context.Context, input SpawnedNodes) error {
+	eg := errgroup.Group{}
+	stmt := "select count()+2 from system.zookeeper where path='/clickhouse/task_queue/'"
+	for _, n := range input.Machines {
+		// Keep pinging CH nodes until a good response
+		node := n
+		eg.Go(func() error {
+			// time.Sleep(time.Second * 4)
+			nodeAddr := fmt.Sprintf("%s.vm.%s.internal", node.Id, utils.FLY_APP)
+			c := dns.Client{}
+			m := &dns.Msg{}
+			m.SetQuestion(dns.Fqdn(nodeAddr), dns.TypeAAAA)
+			m.RecursionDesired = true
+
+			// Keep going until we get an aaaa
+			aaaa := ""
+			for aaaa == "" && ctx.Err() == nil {
+				r, _, err := c.Exchange(m, "[fdaa:1:e6d1::3]:53")
+				if err != nil {
+					return fmt.Errorf("error in c.Exchange: %w", err)
+				}
+				if r.Rcode != dns.RcodeSuccess {
+					fmt.Println("Failed to get an AAAA record")
+					return errors.New("failed to get AAAA record")
+				}
+
+				for _, ain := range r.Answer {
+					if a, ok := ain.(*dns.AAAA); ok {
+						fmt.Printf("AAAA: %v\n", a.AAAA)
+						aaaa = a.AAAA.String()
+					}
+				}
+				time.Sleep(time.Millisecond * 500)
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+
+			opts := &clickhouse.Options{
+				Addr: []string{fmt.Sprintf("[%s]:9000", aaaa)},
+				Auth: clickhouse.Auth{
+					Database: "default",
+					Username: "default",
+				},
+				DialTimeout:     time.Second * 5,
+				MaxOpenConns:    1,
+				MaxIdleConns:    0,
+				ConnMaxLifetime: 2 * time.Minute,
+				Compression: &clickhouse.Compression{
+					Method: clickhouse.CompressionLZ4,
+				},
+			}
+			conn, err := clickhouse.Open(opts)
+			if err != nil {
+				return fmt.Errorf("error connecting to clickhouse: %w", err)
+			}
+
+			var rows driver.Rows
+			for {
+				rows, err = conn.Query(ctx, stmt)
+				if err != nil {
+					if strings.Contains(err.Error(), "connection refused") {
+						// The node is not ready yet, sleep and keep going
+						time.Sleep(time.Millisecond * 500)
+						err = nil
+						continue
+					}
+					return fmt.Errorf("error in conn.Query for node '%s': %w", node.Name, err)
+				}
+				var count uint64
+				for rows.Next() {
+					err = rows.Scan(&count)
+					if err != nil {
+						return fmt.Errorf("error in rows.Scan: %w", err)
+					}
+				}
+				if count < 1 {
+					// Not ready yet
+					continue
+				}
+				break
+			}
+			return err
+		})
+	}
+	err := eg.Wait()
+	if err != nil {
+		logger := zerolog.Ctx(ctx)
+		logger.Error().Err(err).Msg("error waiting for nodes")
+		// return fmt.Errorf("error waiting for nodes: %w", err)
+	}
+
+	return nil
+}
+
+type DeleteNodesInput struct {
+	IDs []string
+}
+
+func (ac *QueryExecutorActivities) DeleteNodes(ctx context.Context, input DeleteNodesInput) error {
+	for _, id := range input.IDs {
+		// TODO: retries for deletion of 5xx codes
+		err := fly.DeleteFlyMachine(ctx, id)
+		if err != nil {
+			return fmt.Errorf("error in fly.DeleteFlyMachine for id %s: %w", id, err)
+		}
+	}
+	return nil
 }

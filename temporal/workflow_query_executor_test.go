@@ -5,6 +5,7 @@ import (
 	"github.com/stretchr/testify/suite"
 	"go.temporal.io/sdk/workflow"
 	"testing"
+	"time"
 
 	"go.temporal.io/sdk/testsuite"
 )
@@ -33,9 +34,10 @@ func (s *UnitTestSuite) TestQueryExecutorWorkflow() {
 	var ac *QueryExecutorActivities
 	s.env.RegisterActivity(ac.SpawnNodes)
 	s.env.RegisterActivity(ac.GetKeeperInfo)
+	s.env.SetTestTimeout(time.Second * 30)
 
 	s.env.ExecuteWorkflow(QueryExecutor, QueryExecutorInput{
-		NumNodes: 3,
+		NumNodes: 2,
 		Query:    "select * from urlCluster('{cluster}', 'https://datasets-documentation.s3.eu-west-3.amazonaws.com/aapl_stock.csv', 'CSVWithNames') LIMIT 5",
 	})
 
