@@ -5,6 +5,7 @@ Authorization: Bearer xxx
 
 {
   "name": "keeper-0",
+  "region": "bos",
   "config": {
     "image": "registry.fly.io/test-bighouse-keeper",
     "metadata": {

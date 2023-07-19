@@ -13,6 +13,7 @@ import (
 	"github.com/samber/lo"
 	"go.temporal.io/sdk/workflow"
 	"golang.org/x/sync/errgroup"
+	"reflect"
 	"strings"
 	"time"
 )
@@ -25,8 +26,8 @@ type (
 	QueryExecutorActivities struct{}
 
 	QueryExecutorInput struct {
-		NumNodes        int
-		Query, NodeSize string
+		NumNodes                             int
+		Query, NodeSize, Cluster, KeeperHost string
 	}
 	QueryExecutorOutput struct {
 		Result string
@@ -40,17 +41,18 @@ func QueryExecutor(ctx workflow.Context, input QueryExecutorInput) (*QueryExecut
 	var ac *QueryExecutorActivities
 
 	// Get keeper info
-	keeperInfo, err := execLocalActivityIO(ctx, ac.GetKeeperInfo, GetKeeperInfoIn{}, time.Second*5)
-	if err != nil {
-		return nil, fmt.Errorf("error in GetKeeperInfo: %w", err)
-	}
+	// keeperInfo, err := execLocalActivityIO(ctx, ac.GetKeeperInfo, GetKeeperInfoIn{}, time.Second*5)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("error in GetKeeperInfo: %w", err)
+	// }
 
 	// Create nodes and boostrap the cluster
+	s := time.Now()
 	createdNodes, err := execLocalActivityIO(ctx, ac.SpawnNodes, SpawnNodesInput{
 		NumNodes:   input.NumNodes,
 		Timeout:    time.Second * 15,
-		KeeperHost: keeperInfo.KeeperURL,
-		Cluster:    keeperInfo.Cluster,
+		KeeperHost: input.KeeperHost,
+		Cluster:    input.Cluster,
 		NodeSize:   input.NodeSize,
 	}, time.Second*6)
 	if err != nil {
@@ -71,13 +73,19 @@ func QueryExecutor(ctx workflow.Context, input QueryExecutorInput) (*QueryExecut
 
 	// Wait for nodes to be ready
 	logger.Debug().Msg("waiting for ch ready...")
-	err = execLocalActivity(ctx, ac.WaitForCHReady, *createdNodes, time.Minute)
+	readyNodes, err := execLocalActivityIO(ctx, ac.WaitForCHReady, *createdNodes, time.Minute)
 	if err != nil {
 		return nil, fmt.Errorf("error in WaitForCHReady: %w", err)
 	}
-	logger.Debug().Msg("CH nodes ready!")
+	logger.Debug().Msgf("CH nodes ready in %s", time.Since(s))
 
 	// TODO: Execute query on cluster, upload results to s3
+	s = time.Now()
+	queryRes, err := execLocalActivityIO(ctx, ac.ExecuteQuery, ExecuteQueryInput{
+		Query:    input.Query,
+		NodePort: fmt.Sprintf("[%s]:9000", readyNodes.NodeIPs[0]),
+	}, time.Minute*60)
+	logger.Info().Interface("queryRes", queryRes).Msgf("Completed query in %s", time.Since(s))
 	// TODO: launch child workflow to clean up nodes?
 	// TODO: Return S3 url
 
@@ -167,14 +175,19 @@ func (ac *QueryExecutorActivities) SpawnNodes(ctx context.Context, input SpawnNo
 }
 
 // TODO: optimize input
-func (ac *QueryExecutorActivities) WaitForCHReady(ctx context.Context, input SpawnedNodes) error {
+type CHReadyOutput struct {
+	NodeIPs []string
+}
+
+func (ac *QueryExecutorActivities) WaitForCHReady(ctx context.Context, input SpawnedNodes) (*CHReadyOutput, error) {
 	eg := errgroup.Group{}
 	stmt := "select count()+2 from system.zookeeper where path='/clickhouse/task_queue/'"
+	out := &CHReadyOutput{NodeIPs: make([]string, 0)}
+	outC := make(chan string, len(input.Machines))
 	for _, n := range input.Machines {
 		// Keep pinging CH nodes until a good response
 		node := n
 		eg.Go(func() error {
-			// time.Sleep(time.Second * 4)
 			nodeAddr := fmt.Sprintf("%s.vm.%s.internal", node.Id, utils.FLY_APP)
 			c := dns.Client{}
 			m := &dns.Msg{}
@@ -184,6 +197,7 @@ func (ac *QueryExecutorActivities) WaitForCHReady(ctx context.Context, input Spa
 			// Keep going until we get an aaaa
 			aaaa := ""
 			for aaaa == "" && ctx.Err() == nil {
+				// for local dev, can probably disable once on fly net? Or can use OS-level DNS with net package
 				r, _, err := c.Exchange(m, "[fdaa:1:e6d1::3]:53")
 				if err != nil {
 					return fmt.Errorf("error in c.Exchange: %w", err)
@@ -224,6 +238,8 @@ func (ac *QueryExecutorActivities) WaitForCHReady(ctx context.Context, input Spa
 				return fmt.Errorf("error connecting to clickhouse: %w", err)
 			}
 
+			defer conn.Close()
+
 			var rows driver.Rows
 			for {
 				rows, err = conn.Query(ctx, stmt)
@@ -249,7 +265,11 @@ func (ac *QueryExecutorActivities) WaitForCHReady(ctx context.Context, input Spa
 				}
 				break
 			}
-			return err
+			if err != nil {
+				return err
+			}
+			outC <- aaaa
+			return nil
 		})
 	}
 	err := eg.Wait()
@@ -258,8 +278,13 @@ func (ac *QueryExecutorActivities) WaitForCHReady(ctx context.Context, input Spa
 		logger.Error().Err(err).Msg("error waiting for nodes")
 		// return fmt.Errorf("error waiting for nodes: %w", err)
 	}
+	close(outC)
 
-	return nil
+	for i := range outC {
+		out.NodeIPs = append(out.NodeIPs, i)
+	}
+
+	return out, nil
 }
 
 type DeleteNodesInput struct {
@@ -275,4 +300,63 @@ func (ac *QueryExecutorActivities) DeleteNodes(ctx context.Context, input Delete
 		}
 	}
 	return nil
+}
+
+type (
+	ExecuteQueryInput struct {
+		Query, NodePort string
+	}
+	ExecuteQueryOutput struct {
+		Runtime time.Duration
+		Cols    []string
+		Rows    []any
+	}
+)
+
+func (ac *QueryExecutorActivities) ExecuteQuery(ctx context.Context, input ExecuteQueryInput) (*ExecuteQueryOutput, error) {
+	logger := zerolog.Ctx(ctx)
+	logger.Debug().Msg("starting query...")
+	s := time.Now()
+	opts := &clickhouse.Options{
+		Addr: []string{input.NodePort},
+		Auth: clickhouse.Auth{
+			Database: "default",
+			Username: "default",
+		},
+		DialTimeout:     time.Second * 5,
+		MaxOpenConns:    1,
+		MaxIdleConns:    0,
+		ConnMaxLifetime: 2 * time.Minute,
+		Compression: &clickhouse.Compression{
+			Method: clickhouse.CompressionLZ4,
+		},
+	}
+	conn, err := clickhouse.Open(opts)
+	if err != nil {
+		return nil, fmt.Errorf("error connecting to clickhouse: %w", err)
+	}
+	defer conn.Close()
+
+	logger.Debug().Msgf("connected in %s", time.Since(s))
+	rows, err := conn.Query(ctx, input.Query)
+
+	cols := rows.Columns()
+
+	out := &ExecuteQueryOutput{Cols: cols}
+
+	for rows.Next() {
+		row := make([]any, 0)
+		types := rows.ColumnTypes()
+		for _, t := range types {
+			row = append(row, reflect.New(t.ScanType()).Interface())
+		}
+
+		err := rows.Scan(row...)
+		if err != nil {
+			return nil, fmt.Errorf("error in rows.Scan: %w", err)
+		}
+
+		out.Rows = append(out.Rows, row)
+	}
+	return out, nil
 }
