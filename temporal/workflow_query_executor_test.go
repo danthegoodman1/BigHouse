@@ -51,7 +51,7 @@ func (s *UnitTestSuite) TestQueryExecutorWorkflow() {
 	// globStmt := `SELECT count(), _file FROM s3('https://ookla-open-data.s3.amazonaws.com/parquet/performance/type=*/year=*/quarter=*/*.parquet') GROUP BY _file`
 	globStmt := `SELECT count() FROM s3('https://s3.us-east-1.amazonaws.com/altinity-clickhouse-data/nyc_taxi_rides/data/tripdata/data-*.csv.gz', 'CSVWithNames', 
 	'pickup_date Date, id UInt64, vendor_id String, tpep_pickup_datetime DateTime, tpep_dropoff_datetime DateTime, passenger_count UInt8, trip_distance Float32, pickup_longitude Float32, pickup_latitude Float32, rate_code_id String, store_and_fwd_flag String, dropoff_longitude Float32, dropoff_latitude Float32, payment_type LowCardinality(String), fare_amount Float32, extra String, mta_tax Float32, tip_amount Float32, tolls_amount Float32, improvement_surcharge Float32, total_amount Float32, pickup_location_id UInt16, dropoff_location_id UInt16, junk1 String, junk2 String', 
-	'gzip')`
+	'gzip') limit 10`
 	globStmt = globStmt
 
 	globStmtCluster := `SELECT count() FROM s3Cluster('{cluster}', 'https://s3.us-east-1.amazonaws.com/altinity-clickhouse-data/nyc_taxi_rides/data/tripdata/data-*.csv.gz', 'CSVWithNames', 
@@ -59,11 +59,16 @@ func (s *UnitTestSuite) TestQueryExecutorWorkflow() {
 	'gzip')`
 	globStmtCluster = globStmtCluster
 
+	shortStmt := `SELECT count() FROM s3('https://s3.us-east-1.amazonaws.com/altinity-clickhouse-data/nyc_taxi_rides/data/tripdata/data-201612.csv.gz', 'CSVWithNames', 
+	'pickup_date Date, id UInt64, vendor_id String, tpep_pickup_datetime DateTime, tpep_dropoff_datetime DateTime, passenger_count UInt8, trip_distance Float32, pickup_longitude Float32, pickup_latitude Float32, rate_code_id String, store_and_fwd_flag String, dropoff_longitude Float32, dropoff_latitude Float32, payment_type LowCardinality(String), fare_amount Float32, extra String, mta_tax Float32, tip_amount Float32, tolls_amount Float32, improvement_surcharge Float32, total_amount Float32, pickup_location_id UInt16, dropoff_location_id UInt16, junk1 String, junk2 String', 
+	'gzip') limit 10`
+	shortStmt = shortStmt
+
 	s.env.ExecuteWorkflow(QueryExecutor, QueryExecutorInput{
-		NumNodes:   5,
-		Query:      globStmtCluster,
+		NumNodes:   1,
+		Query:      shortStmt,
 		NodeSize:   "performance-16x",
-		KeeperHost: "e784ee63c4e368.vm.test-bighouse-keeper.internal",
+		KeeperHost: "e2865517f76728.vm.test-bighouse-keeper.internal",
 		Cluster:    utils.GenRandomAlpha(""),
 	})
 

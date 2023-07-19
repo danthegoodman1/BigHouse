@@ -15,11 +15,13 @@ import (
 	"golang.org/x/sync/errgroup"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 )
 
 var (
-	QueryExecutorPrefix = "wf_sample"
+	QueryExecutorPrefix      = "wf_sample"
+	ErrFailedToGetAAAARecord = errors.New("failed to get AAAA record")
 )
 
 type (
@@ -30,7 +32,8 @@ type (
 		Query, NodeSize, Cluster, KeeperHost string
 	}
 	QueryExecutorOutput struct {
-		Result string
+		Cols []string
+		Rows []any
 	}
 )
 
@@ -47,7 +50,6 @@ func QueryExecutor(ctx workflow.Context, input QueryExecutorInput) (*QueryExecut
 	// }
 
 	// Create nodes and boostrap the cluster
-	s := time.Now()
 	createdNodes, err := execLocalActivityIO(ctx, ac.SpawnNodes, SpawnNodesInput{
 		NumNodes:   input.NumNodes,
 		Timeout:    time.Second * 15,
@@ -71,25 +73,23 @@ func QueryExecutor(ctx workflow.Context, input QueryExecutorInput) (*QueryExecut
 		}
 	}()
 
-	// Wait for nodes to be ready
+	// Wait for nodes to be ready and query
 	logger.Debug().Msg("waiting for ch ready...")
-	readyNodes, err := execLocalActivityIO(ctx, ac.WaitForCHReady, *createdNodes, time.Minute)
-	if err != nil {
-		return nil, fmt.Errorf("error in WaitForCHReady: %w", err)
-	}
-	logger.Debug().Msgf("CH nodes ready in %s", time.Since(s))
-
-	// TODO: Execute query on cluster, upload results to s3
-	s = time.Now()
-	queryRes, err := execLocalActivityIO(ctx, ac.ExecuteQuery, ExecuteQueryInput{
+	queryRes, err := execLocalActivityIO(ctx, ac.WaitAndQuery, *&WaitAndQueryInput{
+		Machines: createdNodes.Machines,
 		Query:    input.Query,
-		NodePort: fmt.Sprintf("[%s]:9000", readyNodes.NodeIPs[0]),
-	}, time.Minute*60)
-	logger.Info().Interface("queryRes", queryRes).Msgf("Completed query in %s", time.Since(s))
+	}, time.Minute)
+	if err != nil {
+		return nil, fmt.Errorf("error in WaitAndQuery: %w", err)
+	}
+
 	// TODO: launch child workflow to clean up nodes?
 	// TODO: Return S3 url
 
-	return nil, nil
+	return &QueryExecutorOutput{
+		Cols: queryRes.Cols,
+		Rows: queryRes.Rows,
+	}, nil
 }
 
 type (
@@ -175,15 +175,27 @@ func (ac *QueryExecutorActivities) SpawnNodes(ctx context.Context, input SpawnNo
 }
 
 // TODO: optimize input
-type CHReadyOutput struct {
-	NodeIPs []string
-}
+type (
+	WaitAndQueryInput struct {
+		Machines []*fly.FlyMachine
+		Query    string
+	}
+	WaitAndQueryOutput struct {
+		Runtime time.Duration
+		Cols    []string
+		Rows    []any
+	}
+)
 
-func (ac *QueryExecutorActivities) WaitForCHReady(ctx context.Context, input SpawnedNodes) (*CHReadyOutput, error) {
+func (ac *QueryExecutorActivities) WaitAndQuery(ctx context.Context, input WaitAndQueryInput) (*WaitAndQueryOutput, error) {
+	logger := zerolog.Ctx(ctx)
 	eg := errgroup.Group{}
 	stmt := "select count()+2 from system.zookeeper where path='/clickhouse/task_queue/'"
-	out := &CHReadyOutput{NodeIPs: make([]string, 0)}
+
 	outC := make(chan string, len(input.Machines))
+	mu := &sync.Mutex{}
+	var savedConn driver.Conn
+	s := time.Now()
 	for _, n := range input.Machines {
 		// Keep pinging CH nodes until a good response
 		node := n
@@ -203,8 +215,7 @@ func (ac *QueryExecutorActivities) WaitForCHReady(ctx context.Context, input Spa
 					return fmt.Errorf("error in c.Exchange: %w", err)
 				}
 				if r.Rcode != dns.RcodeSuccess {
-					fmt.Println("Failed to get an AAAA record")
-					return errors.New("failed to get AAAA record")
+					return ErrFailedToGetAAAARecord
 				}
 
 				for _, ain := range r.Answer {
@@ -238,8 +249,6 @@ func (ac *QueryExecutorActivities) WaitForCHReady(ctx context.Context, input Spa
 				return fmt.Errorf("error connecting to clickhouse: %w", err)
 			}
 
-			defer conn.Close()
-
 			var rows driver.Rows
 			for {
 				rows, err = conn.Query(ctx, stmt)
@@ -269,6 +278,16 @@ func (ac *QueryExecutorActivities) WaitForCHReady(ctx context.Context, input Spa
 				return err
 			}
 			outC <- aaaa
+			// The first one to finish will be out query node
+			mu.Lock()
+			defer mu.Unlock()
+			if savedConn == nil {
+				logger.Debug().Msgf("Saving node %s", node.Name)
+				savedConn = conn
+			} else {
+				logger.Debug().Msgf("NOT Saving node %s", node.Name)
+				defer conn.Close()
+			}
 			return nil
 		})
 	}
@@ -281,8 +300,34 @@ func (ac *QueryExecutorActivities) WaitForCHReady(ctx context.Context, input Spa
 	close(outC)
 
 	for i := range outC {
-		out.NodeIPs = append(out.NodeIPs, i)
+		logger.Debug().Msgf("Node %s is ready", i)
+		// TODO: Check if we got all the nodes ready in time
 	}
+	logger.Debug().Msgf("Nodes ready in %s", time.Since(s))
+	s = time.Now()
+
+	rows, err := savedConn.Query(ctx, input.Query)
+
+	cols := rows.Columns()
+
+	out := &WaitAndQueryOutput{Cols: cols}
+
+	for rows.Next() {
+		row := make([]any, 0)
+		types := rows.ColumnTypes()
+		for _, t := range types {
+			row = append(row, reflect.New(t.ScanType()).Interface())
+		}
+
+		err := rows.Scan(row...)
+		if err != nil {
+			return nil, fmt.Errorf("error in rows.Scan: %w", err)
+		}
+
+		out.Rows = append(out.Rows, row)
+	}
+
+	logger.Debug().Msgf("Query complete in in %s", time.Since(s))
 
 	return out, nil
 }
