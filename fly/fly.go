@@ -73,10 +73,10 @@ var (
 	ErrFlyHighStatusCode = errors.New("fly high status code")
 )
 
-func doFlyMachineReq(ctx context.Context, path, method string, body []byte) (*FlyMachine, error) {
+func doFlyMachineReq(ctx context.Context, path, method string, body []byte) (*FlyMachine, int, error) {
 	req, err := http.NewRequestWithContext(ctx, method, fmt.Sprintf("https://api.machines.dev/v1/apps/%s%s", utils.FLY_APP, path), bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("error in http.NewRequest: %w", err)
+		return nil, 0, fmt.Errorf("error in http.NewRequest: %w", err)
 	}
 
 	if body != nil {
@@ -86,92 +86,25 @@ func doFlyMachineReq(ctx context.Context, path, method string, body []byte) (*Fl
 
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("error in http.Do: %w", err)
+		return nil, res.StatusCode, fmt.Errorf("error in http.Do: %w", err)
 	}
 
 	resBody, err := io.ReadAll(res.Body)
 	if err != nil {
-		return nil, fmt.Errorf("error in io.ReadAll: %w", err)
+		return nil, res.StatusCode, fmt.Errorf("error in io.ReadAll: %w", err)
 	}
 
 	if res.StatusCode >= 300 {
-		return nil, fmt.Errorf("high status code %d: %s :: %w", res.StatusCode, string(resBody), ErrFlyHighStatusCode)
+		return nil, res.StatusCode, fmt.Errorf("high status code %d: %s :: %w", res.StatusCode, string(resBody), ErrFlyHighStatusCode)
 	}
 
 	var fm FlyMachine
 	err = json.Unmarshal(resBody, &fm)
 	if err != nil {
-		return nil, fmt.Errorf("error in json.Unmarshal of fly response: %w", err)
+		return nil, 0, fmt.Errorf("error in json.Unmarshal of fly response: %w", err)
 	}
 
-	return &fm, nil
-}
-
-func CreateMinimalCHMachine(ctx context.Context, name string) (*FlyMachine, error) {
-	fm, err := doFlyMachineReq(ctx, "/machines", "POST", []byte(fmt.Sprintf(`
-		{
-		  "name": "%s",
-		  "size": "performance-2x",
-		  "config": {
-			"image": "registry.fly.io/test-bighouse"
-		  }
-		}
-	`, name)))
-	if err != nil {
-		return nil, fmt.Errorf("error in doFlyMachineReq: %w", err)
-	}
-
-	return fm, nil
-}
-
-func UpdateFlyCHMachine(ctx context.Context, id, name, keeperHost, keeperPort, remoteReplicas, shard, cluster, replica string) (*FlyMachine, error) {
-	jBytes, err := json.Marshal(map[string]any{
-		"name": name,
-		"config": map[string]any{
-			"image": "registry.fly.io/test-bighouse",
-			"size":  "performance-2x",
-			"env": map[string]any{
-				"ZK_HOST_1":       keeperHost,
-				"ZK_PORT_1":       keeperPort,
-				"REMOTE_REPLICAS": remoteReplicas,
-				"SHARD":           shard,
-				"CLUSTER":         cluster,
-				"REPLICA":         replica,
-			},
-			"metadata": map[string]any{
-				"name": name,
-			},
-			"services": []map[string]any{
-				{
-					"ports": []map[string]int{
-						{
-							"port": 9000,
-						},
-					},
-					"protocol":      "tcp",
-					"internal_port": 9000,
-				},
-				{
-					"ports": []map[string]int{
-						{
-							"port": 8123,
-						},
-					},
-					"protocol":      "tcp",
-					"internal_port": 8123,
-				},
-			},
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("error in json.Marshal: %w", err)
-	}
-	fm, err := doFlyMachineReq(ctx, "/machines/"+id, "POST", jBytes)
-	if err != nil {
-		return nil, fmt.Errorf("error in doFlyMachineReq: %w", err)
-	}
-
-	return fm, nil
+	return &fm, res.StatusCode, nil
 }
 
 func CreateFullCHMachine(ctx context.Context, name, keeperHost, keeperPort, remoteReplicas, shard, cluster, replica, nodeSize string) (*FlyMachine, error) {
@@ -217,7 +150,7 @@ func CreateFullCHMachine(ctx context.Context, name, keeperHost, keeperPort, remo
 	if err != nil {
 		return nil, fmt.Errorf("error in json.Marshal: %w", err)
 	}
-	fm, err := doFlyMachineReq(ctx, "/machines", "POST", jBytes)
+	fm, _, err := doFlyMachineReq(ctx, "/machines", "POST", jBytes)
 	if err != nil {
 		return nil, fmt.Errorf("error in doFlyMachineReq: %w", err)
 	}
@@ -226,6 +159,6 @@ func CreateFullCHMachine(ctx context.Context, name, keeperHost, keeperPort, remo
 }
 
 func DeleteFlyMachine(ctx context.Context, id string) error {
-	_, err := doFlyMachineReq(ctx, "/machines/"+id+"?force=true", "DELETE", nil)
+	_, _, err := doFlyMachineReq(ctx, "/machines/"+id+"?force=true", "DELETE", nil)
 	return err
 }
