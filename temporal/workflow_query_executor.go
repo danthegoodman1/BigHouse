@@ -314,9 +314,6 @@ type (
 )
 
 func (ac *QueryExecutorActivities) ExecuteQuery(ctx context.Context, input ExecuteQueryInput) (*ExecuteQueryOutput, error) {
-	logger := zerolog.Ctx(ctx)
-	logger.Debug().Msg("starting query...")
-	s := time.Now()
 	opts := &clickhouse.Options{
 		Addr: []string{input.NodePort},
 		Auth: clickhouse.Auth{
@@ -337,7 +334,6 @@ func (ac *QueryExecutorActivities) ExecuteQuery(ctx context.Context, input Execu
 	}
 	defer conn.Close()
 
-	logger.Debug().Msgf("connected in %s", time.Since(s))
 	rows, err := conn.Query(ctx, input.Query)
 
 	cols := rows.Columns()
