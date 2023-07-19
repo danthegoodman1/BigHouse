@@ -2,7 +2,7 @@ To keep the License simple:
 
 Section 1: You may (not intended to be comprehensive):
 a. Use this for personal projects
-b. Use this within your company to power other products that are not directly exposing BigHouse as the functionality (e.g. offering a distributed KV store backed by BigHouse)
+b. Use this within your company to power other products that are not directly exposing BigHouse as the functionality (e.g. offering a OLAP DB backed by BigHouse)
 c. Use this in commercial and non commercial settings
 d. Fork, clone, modify, and contribute!
 
