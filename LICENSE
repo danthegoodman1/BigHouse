@@ -8,7 +8,7 @@ d. Fork, clone, modify, and contribute!
 
 Section 2: You may NOT (not comprehensive):
 a. Sell hosted BigHouse
-b. Sell a thin layer over BigHouse (e.g. offering a distributed KV store backed by BigHouse)
+b. Sell a thin layer over BigHouse (e.g. offering a OLAP DB backed by BigHouse)
 c. Clone BigHouse without keeping open source and openly referencing BigHouse as the parent
 
 Omission from section 2 is not express or implicit permission. Use common sense. If you are unsure, please reach out! Section 1 is also not comprehensive, there are likely more instances where BigHouse would be well used.
