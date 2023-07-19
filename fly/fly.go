@@ -174,12 +174,12 @@ func UpdateFlyCHMachine(ctx context.Context, id, name, keeperHost, keeperPort, r
 	return fm, nil
 }
 
-func CreateFullCHMachine(ctx context.Context, name, keeperHost, keeperPort, remoteReplicas, shard, cluster, replica string) (*FlyMachine, error) {
+func CreateFullCHMachine(ctx context.Context, name, keeperHost, keeperPort, remoteReplicas, shard, cluster, replica, nodeSize string) (*FlyMachine, error) {
 	jBytes, err := json.Marshal(map[string]any{
 		"name": name,
 		"config": map[string]any{
 			"image": "registry.fly.io/test-bighouse",
-			"size":  "performance-2x",
+			"size":  nodeSize,
 			"env": map[string]any{
 				"ZK_HOST_1":       keeperHost,
 				"ZK_PORT_1":       keeperPort,

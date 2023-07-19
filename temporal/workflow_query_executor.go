@@ -25,8 +25,8 @@ type (
 	QueryExecutorActivities struct{}
 
 	QueryExecutorInput struct {
-		NumNodes int
-		Query    string
+		NumNodes        int
+		Query, NodeSize string
 	}
 	QueryExecutorOutput struct {
 		Result string
@@ -51,6 +51,7 @@ func QueryExecutor(ctx workflow.Context, input QueryExecutorInput) (*QueryExecut
 		Timeout:    time.Second * 15,
 		KeeperHost: keeperInfo.KeeperURL,
 		Cluster:    keeperInfo.Cluster,
+		NodeSize:   input.NodeSize,
 	}, time.Second*6)
 	if err != nil {
 		return nil, fmt.Errorf("error in SpawnNodes: %w", err)
@@ -102,9 +103,9 @@ func (ac *QueryExecutorActivities) GetKeeperInfo(ctx context.Context, input GetK
 
 type (
 	SpawnNodesInput struct {
-		NumNodes            int
-		Timeout             time.Duration
-		KeeperHost, Cluster string
+		NumNodes                      int
+		Timeout                       time.Duration
+		KeeperHost, Cluster, NodeSize string
 	}
 	SpawnedNodes struct {
 		Machines []*fly.FlyMachine
@@ -137,7 +138,7 @@ func (ac *QueryExecutorActivities) SpawnNodes(ctx context.Context, input SpawnNo
 	for i := 0; i < input.NumNodes; i++ {
 		go func(ctx context.Context, c chan AsyncFlyMachine, i int) {
 			nodeName := fmt.Sprintf("%s-%d", namePrefix, i)
-			machine, err := fly.CreateFullCHMachine(ctx, nodeName, input.KeeperHost, "2181", remoteReplicas, shard, input.Cluster, nodeName)
+			machine, err := fly.CreateFullCHMachine(ctx, nodeName, input.KeeperHost, "2181", remoteReplicas, shard, input.Cluster, nodeName, input.NodeSize)
 			if err != nil {
 				logger.Error().Err(err).Int("index", i).Msg("error spawning fly machine")
 			}

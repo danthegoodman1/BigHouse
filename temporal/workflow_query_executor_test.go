@@ -50,6 +50,7 @@ func (s *UnitTestSuite) TestQueryExecutorWorkflow() {
 	s.env.ExecuteWorkflow(QueryExecutor, QueryExecutorInput{
 		NumNodes: 2,
 		Query:    smallStmt,
+		NodeSize: "performance-2x",
 	})
 
 	s.True(s.env.IsWorkflowCompleted())
