@@ -65,10 +65,10 @@ func (s *UnitTestSuite) TestQueryExecutorWorkflow() {
 	shortStmt = shortStmt
 
 	s.env.ExecuteWorkflow(QueryExecutor, QueryExecutorInput{
-		NumNodes:   1,
+		NumNodes:   3,
 		Query:      shortStmt,
 		NodeSize:   "performance-16x",
-		KeeperHost: "e2865517f76728.vm.test-bighouse-keeper.internal",
+		KeeperHost: "328744d1f61458.vm.test-bighouse-keeper.internal",
 		Cluster:    utils.GenRandomAlpha(""),
 	})
 

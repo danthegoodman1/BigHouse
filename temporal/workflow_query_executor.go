@@ -306,6 +306,10 @@ func (ac *QueryExecutorActivities) WaitAndQuery(ctx context.Context, input WaitA
 	logger.Debug().Msgf("Nodes ready in %s", time.Since(s))
 	s = time.Now()
 
+	if savedConn == nil {
+		return nil, errors.New("no saved conn, were you on the wireguard network?")
+	}
+
 	rows, err := savedConn.Query(ctx, input.Query)
 
 	cols := rows.Columns()
