@@ -10,6 +10,25 @@ With 30 saturated 2Gbit nics and 10:1 avg compression, that ends up being 2gbit 
 
 For 15 seconds that EC2 instance would cost $0.03 for 192 cores. Multiply by 2.5x to get to 480 cores and that's already $0.075, nearly the same cost, but you haven't considered the 30s first boot time (or 10s subsequent boot times), the cost of the disk, etc.
 
+## How to run
+
+Easiest way is to just use a test, it will download and execute temporal for you. You do need Taskfile though.
+
+```
+task single-test -- ./temporal -run TestQueryExecutorWorkflow
+```
+
+`.env` file should look like:
+
+```ini
+FLY_API_TOKEN=xxx
+FLY_APP=xxx
+ENV=local
+DEBUG=1
+PRETTY=1
+TEMPORAL_URL=localhost:7233
+```
+
 ## Primitive Performance Test
 
 96 CSV files:
