@@ -30,6 +30,7 @@ type (
 	QueryExecutorInput struct {
 		NumNodes                             int
 		Query, NodeSize, Cluster, KeeperHost string
+		InitQueries                          []string
 	}
 	QueryExecutorOutput struct {
 		Cols []string
@@ -76,8 +77,9 @@ func QueryExecutor(ctx workflow.Context, input QueryExecutorInput) (*QueryExecut
 	// Wait for nodes to be ready and query
 	logger.Debug().Msg("waiting for ch ready...")
 	queryRes, err := execLocalActivityIO(ctx, ac.WaitAndQuery, *&WaitAndQueryInput{
-		Machines: createdNodes.Machines,
-		Query:    input.Query,
+		Machines:    createdNodes.Machines,
+		Query:       input.Query,
+		InitQueries: input.InitQueries,
 	}, time.Minute)
 	if err != nil {
 		return nil, fmt.Errorf("error in WaitAndQuery: %w", err)
@@ -177,8 +179,9 @@ func (ac *QueryExecutorActivities) SpawnNodes(ctx context.Context, input SpawnNo
 // TODO: optimize input
 type (
 	WaitAndQueryInput struct {
-		Machines []*fly.FlyMachine
-		Query    string
+		Machines    []*fly.FlyMachine
+		Query       string
+		InitQueries []string
 	}
 	WaitAndQueryOutput struct {
 		Runtime time.Duration
@@ -309,6 +312,29 @@ func (ac *QueryExecutorActivities) WaitAndQuery(ctx context.Context, input WaitA
 	if savedConn == nil {
 		return nil, errors.New("no saved conn, were you on the wireguard network?")
 	}
+
+	// Run init queries
+	// for _, query := range input.InitQueries {
+	// 	rows, err := savedConn.Query(ctx, input.Query)
+	//
+	// 	cols := rows.Columns()
+	// 	var outRows []any
+	//
+	// 	for rows.Next() {
+	// 		row := make([]any, 0)
+	// 		types := rows.ColumnTypes()
+	// 		for _, t := range types {
+	// 			row = append(row, reflect.New(t.ScanType()).Interface())
+	// 		}
+	//
+	// 		err := rows.Scan(row...)
+	// 		if err != nil {
+	// 			return nil, fmt.Errorf("error in rows.Scan: %w", err)
+	// 		}
+	//
+	// 		outRows = append(outRows, row)
+	// 	}
+	// }
 
 	rows, err := savedConn.Query(ctx, input.Query)
 
