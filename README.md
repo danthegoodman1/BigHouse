@@ -37,27 +37,33 @@ TEMPORAL_URL=localhost:7233
       96
 ```
 
+Nodes in `iad` fly.io region.
+
 Single node:
 ```
 SELECT count() FROM s3('https://s3.us-east-1.amazonaws.com/altinity-clickhouse-data/nyc_taxi_rides/data/tripdata/data-*.csv.gz', 'CSVWithNames',
 'pickup_date Date, id UInt64, vendor_id String, tpep_pickup_datetime DateTime, tpep_dropoff_datetime DateTime, passenger_count UInt8, trip_distance Float32, pickup_longitude Float32, pickup_latitude Float32, rate_code_id String, store_and_fwd_flag String, dropoff_longitude Float32, dropoff_latitude Float32, payment_type LowCardinality(String), fare_amount Float32, extra String, mta_tax Float32, tip_amount Float32, tolls_amount Float32, improvement_surcharge Float32, total_amount Float32, pickup_location_id UInt16, dropoff_location_id UInt16, junk1 String, junk2 String',
 'gzip')
 
-Completed query in 2m21.991214525s
+Completed query in 143.243 sec
 ```
 
-5 Nodes:
+It was clear that this was pretty CPU-limited for a lot of the query
+
+6 Nodes:
 ```
 SELECT count() FROM s3Cluster('{cluster}', 'https://s3.us-east-1.amazonaws.com/altinity-clickhouse-data/nyc_taxi_rides/data/tripdata/data-*.csv.gz', 'CSVWithNames', 
 	'pickup_date Date, id UInt64, vendor_id String, tpep_pickup_datetime DateTime, tpep_dropoff_datetime DateTime, passenger_count UInt8, trip_distance Float32, pickup_longitude Float32, pickup_latitude Float32, rate_code_id String, store_and_fwd_flag String, dropoff_longitude Float32, dropoff_latitude Float32, payment_type LowCardinality(String), fare_amount Float32, extra String, mta_tax Float32, tip_amount Float32, tolls_amount Float32, improvement_surcharge Float32, total_amount Float32, pickup_location_id UInt16, dropoff_location_id UInt16, junk1 String, junk2 String', 
 	'gzip')
 
-Completed query in 59.487185924s
+Completed query in 38.804 sec
 ```
+
+Noticed that despite having 96 cores, there were only 50-something S3 readers. Created issue for CH here: https://github.com/ClickHouse/ClickHouse/issues/52437 (give it a 👍!)
 
 ## PoC
 
-The PoC uses docker compose to create a ZK node and ClickHouse cluster, poll for expected cluster state, then:
+The PoC uses docker compose to create a Keeper node and ClickHouse cluster, poll for expected cluster state, then:
 
 ```
 bash run.sh

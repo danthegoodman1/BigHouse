@@ -4,8 +4,8 @@ Content-Type: application/json
 Authorization: Bearer xxx
 
 {
-  "name": "keeper-0",
-  "region": "bos",
+  "name": "keeper-1",
+  "region": "iad",
   "config": {
     "image": "registry.fly.io/test-bighouse-keeper",
     "metadata": {

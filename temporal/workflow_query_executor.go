@@ -148,7 +148,7 @@ func (ac *QueryExecutorActivities) SpawnNodes(ctx context.Context, input SpawnNo
 	for i := 0; i < input.NumNodes; i++ {
 		go func(ctx context.Context, c chan AsyncFlyMachine, i int) {
 			nodeName := fmt.Sprintf("%s-%d", namePrefix, i)
-			machine, err := fly.CreateFullCHMachine(ctx, nodeName, input.KeeperHost, "2181", remoteReplicas, shard, input.Cluster, nodeName, input.NodeSize)
+			machine, err := fly.CreateFullCHMachine(ctx, nodeName, "iad", input.KeeperHost, "2181", remoteReplicas, shard, input.Cluster, nodeName, input.NodeSize)
 			if err != nil {
 				logger.Error().Err(err).Int("index", i).Msg("error spawning fly machine")
 			}
