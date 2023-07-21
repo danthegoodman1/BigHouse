@@ -21,13 +21,13 @@ tasks:
       # task single-test -- TestName
   docker:
     cmds:
-      - cd ch && docker build -t registry.fly.io/test-bighouse .
-      - docker push registry.fly.io/test-bighouse
+      - cd ch && docker build -t registry.fly.io/test-bighouse-t .
+      - docker push registry.fly.io/test-bighouse-t
 
   keeper:
     cmds:
-      - cd keeper && docker build -t registry.fly.io/test-bighouse-keeper .
-      - docker push registry.fly.io/test-bighouse-keeper
+      - cd keeper && docker build -t registry.fly.io/test-bighouse-t-keeper .
+      - docker push registry.fly.io/test-bighouse-t-keeper
 
   install-deps:
     cmds:

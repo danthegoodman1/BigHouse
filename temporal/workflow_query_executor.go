@@ -64,15 +64,15 @@ func QueryExecutor(ctx workflow.Context, input QueryExecutorInput) (*QueryExecut
 
 	logger.Debug().Msg("created nodes")
 
-	defer func() {
-		// Clean nodes
-		err = execLocalActivity(ctx, ac.DeleteNodes, DeleteNodesInput{IDs: lo.Map(createdNodes.Machines, func(item *fly.FlyMachine, index int) string {
-			return item.Id
-		})}, time.Minute)
-		if err != nil {
-			logger.Error().Err(err).Msg("error deleting nodes")
-		}
-	}()
+	// defer func() {
+	// 	// Clean nodes
+	// 	err = execLocalActivity(ctx, ac.DeleteNodes, DeleteNodesInput{IDs: lo.Map(createdNodes.Machines, func(item *fly.FlyMachine, index int) string {
+	// 		return item.Id
+	// 	})}, time.Minute)
+	// 	if err != nil {
+	// 		logger.Error().Err(err).Msg("error deleting nodes")
+	// 	}
+	// }()
 
 	// Wait for nodes to be ready and query
 	logger.Debug().Msg("waiting for ch ready...")
@@ -91,23 +91,6 @@ func QueryExecutor(ctx workflow.Context, input QueryExecutorInput) (*QueryExecut
 	return &QueryExecutorOutput{
 		Cols: queryRes.Cols,
 		Rows: queryRes.Rows,
-	}, nil
-}
-
-type (
-	GetKeeperInfoIn struct {
-	}
-	KeeperInfo struct {
-		KeeperURL, Cluster string
-	}
-)
-
-func (ac *QueryExecutorActivities) GetKeeperInfo(ctx context.Context, input GetKeeperInfoIn) (*KeeperInfo, error) {
-	logger := zerolog.Ctx(ctx)
-	logger.Debug().Msg("getting keeper info")
-	return &KeeperInfo{
-		KeeperURL: "3d8d99eda22068.vm.test-bighouse-keeper.internal",
-		Cluster:   utils.GenRandomAlpha(""),
 	}, nil
 }
 
@@ -213,7 +196,7 @@ func (ac *QueryExecutorActivities) WaitAndQuery(ctx context.Context, input WaitA
 			aaaa := ""
 			for aaaa == "" && ctx.Err() == nil {
 				// for local dev, can probably disable once on fly net? Or can use OS-level DNS with net package
-				r, _, err := c.Exchange(m, "[fdaa:1:e6d1::3]:53")
+				r, _, err := c.Exchange(m, "[fdaa:2:9366::3]:53")
 				if err != nil {
 					return fmt.Errorf("error in c.Exchange: %w", err)
 				}

@@ -1,5 +1,5 @@
 ### Create a machine
-POST https://api.machines.dev/v1/apps/test-bighouse-keeper/machines
+POST https://api.machines.dev/v1/apps/test-bighouse-t-keeper/machines
 Content-Type: application/json
 Authorization: Bearer xxx
 
@@ -7,7 +7,7 @@ Authorization: Bearer xxx
   "name": "keeper-1",
   "region": "iad",
   "config": {
-    "image": "registry.fly.io/test-bighouse-keeper",
+    "image": "registry.fly.io/test-bighouse-t-keeper",
     "metadata": {
       "hey": "ho"
     },

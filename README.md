@@ -39,6 +39,12 @@ TEMPORAL_URL=localhost:7233
 
 Nodes in `iad` fly.io region.
 
+```
+[6] Nodes ready in 3.221804869s
+```
+
+VERY unoptimized CH image. The more nodes the higher the chance it takes longer. iad I'm getting typically 3-5s for 6 nodes.
+
 Single node:
 ```
 SELECT count() FROM s3('https://s3.us-east-1.amazonaws.com/altinity-clickhouse-data/nyc_taxi_rides/data/tripdata/data-*.csv.gz', 'CSVWithNames',

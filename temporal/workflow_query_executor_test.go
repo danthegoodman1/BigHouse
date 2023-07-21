@@ -34,7 +34,6 @@ func TestQueryExecutorWorkflow(t *testing.T) {
 func (s *UnitTestSuite) TestQueryExecutorWorkflow() {
 	var ac *QueryExecutorActivities
 	s.env.RegisterActivity(ac.SpawnNodes)
-	s.env.RegisterActivity(ac.GetKeeperInfo)
 	s.env.SetTestTimeout(time.Minute * 100)
 
 	bigStmt := `
@@ -59,6 +58,11 @@ func (s *UnitTestSuite) TestQueryExecutorWorkflow() {
 	'gzip')`
 	globStmtCluster = globStmtCluster
 
+	globStmtClusterUrl := `SELECT count() FROM urlCluster('{cluster}', 'https://s3.us-east-1.amazonaws.com/altinity-clickhouse-data/nyc_taxi_rides/data/tripdata/data-{2009..2016}{01..12}.csv.gz', 'CSVWithNames', 
+	'pickup_date Date, id UInt64, vendor_id String, tpep_pickup_datetime DateTime, tpep_dropoff_datetime DateTime, passenger_count UInt8, trip_distance Float32, pickup_longitude Float32, pickup_latitude Float32, rate_code_id String, store_and_fwd_flag String, dropoff_longitude Float32, dropoff_latitude Float32, payment_type LowCardinality(String), fare_amount Float32, extra String, mta_tax Float32, tip_amount Float32, tolls_amount Float32, improvement_surcharge Float32, total_amount Float32, pickup_location_id UInt16, dropoff_location_id UInt16, junk1 String, junk2 String', 
+	'gzip')`
+	globStmtClusterUrl = globStmtClusterUrl
+
 	shortStmt := `SELECT count() FROM s3('https://s3.us-east-1.amazonaws.com/altinity-clickhouse-data/nyc_taxi_rides/data/tripdata/data-201612.csv.gz', 'CSVWithNames', 
 	'pickup_date Date, id UInt64, vendor_id String, tpep_pickup_datetime DateTime, tpep_dropoff_datetime DateTime, passenger_count UInt8, trip_distance Float32, pickup_longitude Float32, pickup_latitude Float32, rate_code_id String, store_and_fwd_flag String, dropoff_longitude Float32, dropoff_latitude Float32, payment_type LowCardinality(String), fare_amount Float32, extra String, mta_tax Float32, tip_amount Float32, tolls_amount Float32, improvement_surcharge Float32, total_amount Float32, pickup_location_id UInt16, dropoff_location_id UInt16, junk1 String, junk2 String', 
 	'gzip') limit 10`
@@ -66,9 +70,9 @@ func (s *UnitTestSuite) TestQueryExecutorWorkflow() {
 
 	s.env.ExecuteWorkflow(QueryExecutor, QueryExecutorInput{
 		NumNodes:   6,
-		Query:      globStmtCluster,
+		Query:      globStmtClusterUrl,
 		NodeSize:   "performance-16x",
-		KeeperHost: "6e82d6d2b14487.vm.test-bighouse-keeper.internal",
+		KeeperHost: "5683d5d9f77968.vm.test-bighouse-t-keeper.internal",
 		Cluster:    utils.GenRandomAlpha(""),
 	})
 
@@ -79,3 +83,12 @@ func (s *UnitTestSuite) TestQueryExecutorWorkflow() {
 	s.NoError(s.env.GetWorkflowResult(&result))
 	fmt.Printf("Workflow result: %+v\n", result)
 }
+
+// SELECT
+// name,
+// elapsed_us,
+// input_wait_elapsed_us,
+// output_wait_elapsed_us
+// FROM clusterAllReplicas('{cluster}', system.processors_profile_log)
+// WHERE initial_query_id = '1c94853d-bb96-45f3-973d-a33a00f2dfb8'
+// ORDER BY name ASC;

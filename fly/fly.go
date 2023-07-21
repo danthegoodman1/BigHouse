@@ -112,7 +112,7 @@ func CreateFullCHMachine(ctx context.Context, name, region, keeperHost, keeperPo
 		"name":   name,
 		"region": region,
 		"config": map[string]any{
-			"image": "registry.fly.io/test-bighouse",
+			"image": "registry.fly.io/" + utils.FLY_APP,
 			"size":  nodeSize,
 			"env": map[string]any{
 				"ZK_HOST_1":       keeperHost,
