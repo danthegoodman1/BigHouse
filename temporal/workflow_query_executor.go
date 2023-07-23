@@ -53,10 +53,13 @@ func QueryExecutor(ctx workflow.Context, input QueryExecutorInput) (*QueryExecut
 
 	// Create nodes and boostrap the cluster
 	createdNodes, err := execLocalActivityIO(ctx, ac.SpawnNodes, SpawnNodesInput{
-		NumNodes:   input.NumNodes,
 		Timeout:    time.Second * 15,
 		KeeperHost: input.KeeperHost,
 		Cluster:    input.Cluster,
+		CPUKind:    input.CPUKind,
+		MemoryMB:   input.MemoryMB,
+		Cores:      input.Cores,
+		NumNodes:   input.NumNodes,
 	}, time.Second*6)
 	if err != nil {
 		return nil, fmt.Errorf("error in SpawnNodes: %w", err)

@@ -70,8 +70,8 @@ func (s *UnitTestSuite) TestQueryExecutorWorkflow() {
 
 	s.env.ExecuteWorkflow(QueryExecutor, QueryExecutorInput{
 		NumNodes:    6,
-		Query:       "select count() from (select count(), repo_name from github_events_all group by repo_name) settings max_parallel_replicas=100",
-		KeeperHost:  "784e297a2d4148.vm.test-bighouse-t-keeper.internal",
+		Query:       "select 1",
+		KeeperHost:  "2865603fe67558.vm.test-bighouse-t-keeper.internal",
 		Cluster:     utils.GenRandomAlpha(""),
 		CPUKind:     "performance",
 		Cores:       16,
