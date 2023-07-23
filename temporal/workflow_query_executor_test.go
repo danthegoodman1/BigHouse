@@ -69,11 +69,12 @@ func (s *UnitTestSuite) TestQueryExecutorWorkflow() {
 	shortStmt = shortStmt
 
 	s.env.ExecuteWorkflow(QueryExecutor, QueryExecutorInput{
-		NumNodes:   6,
-		Query:      globStmtClusterUrl,
-		NodeSize:   "performance-16x",
-		KeeperHost: "5683d5d9f77968.vm.test-bighouse-t-keeper.internal",
-		Cluster:    utils.GenRandomAlpha(""),
+		NumNodes:    6,
+		Query:       "select 1",
+		NodeSize:    "performance-16x",
+		KeeperHost:  "32874243f62948.vm.test-bighouse-t-keeper.internal",
+		Cluster:     utils.GenRandomAlpha(""),
+		DeleteNodes: true,
 	})
 
 	s.True(s.env.IsWorkflowCompleted())

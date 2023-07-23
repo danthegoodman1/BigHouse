@@ -31,6 +31,7 @@ type (
 		NumNodes                             int
 		Query, NodeSize, Cluster, KeeperHost string
 		InitQueries                          []string
+		DeleteNodes                          bool
 	}
 	QueryExecutorOutput struct {
 		Cols []string
@@ -64,15 +65,17 @@ func QueryExecutor(ctx workflow.Context, input QueryExecutorInput) (*QueryExecut
 
 	logger.Debug().Msg("created nodes")
 
-	// defer func() {
-	// 	// Clean nodes
-	// 	err = execLocalActivity(ctx, ac.DeleteNodes, DeleteNodesInput{IDs: lo.Map(createdNodes.Machines, func(item *fly.FlyMachine, index int) string {
-	// 		return item.Id
-	// 	})}, time.Minute)
-	// 	if err != nil {
-	// 		logger.Error().Err(err).Msg("error deleting nodes")
-	// 	}
-	// }()
+	if input.DeleteNodes {
+		defer func() {
+			// Clean nodes
+			err = execLocalActivity(ctx, ac.DeleteNodes, DeleteNodesInput{IDs: lo.Map(createdNodes.Machines, func(item *fly.FlyMachine, index int) string {
+				return item.Id
+			})}, time.Minute)
+			if err != nil {
+				logger.Error().Err(err).Msg("error deleting nodes")
+			}
+		}()
+	}
 
 	// Wait for nodes to be ready and query
 	logger.Debug().Msg("waiting for ch ready...")
