@@ -107,13 +107,17 @@ func doFlyMachineReq(ctx context.Context, path, method string, body []byte) (*Fl
 	return &fm, res.StatusCode, nil
 }
 
-func CreateFullCHMachine(ctx context.Context, name, region, keeperHost, keeperPort, remoteReplicas, shard, cluster, replica, nodeSize string) (*FlyMachine, error) {
+func CreateFullCHMachine(ctx context.Context, name, region, keeperHost, keeperPort, remoteReplicas, shard, cluster, replica, cpuKind string, cpus, memoryMB int64) (*FlyMachine, error) {
 	jBytes, err := json.Marshal(map[string]any{
 		"name":   name,
 		"region": region,
 		"config": map[string]any{
 			"image": "registry.fly.io/" + utils.FLY_APP,
-			"size":  nodeSize,
+			"guest": map[string]any{
+				"cpu_kind":  cpuKind,
+				"cpus":      cpus,
+				"memory_mb": memoryMB,
+			},
 			"env": map[string]any{
 				"ZK_HOST_1":       keeperHost,
 				"ZK_PORT_1":       keeperPort,

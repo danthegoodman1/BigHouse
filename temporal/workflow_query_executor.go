@@ -28,10 +28,10 @@ type (
 	QueryExecutorActivities struct{}
 
 	QueryExecutorInput struct {
-		NumNodes                             int
-		Query, NodeSize, Cluster, KeeperHost string
-		InitQueries                          []string
-		DeleteNodes                          bool
+		Query, Cluster, KeeperHost, CPUKind string
+		InitQueries, InitQueriesAll         []string
+		DeleteNodes                         bool
+		MemoryMB, Cores, NumNodes           int64
 	}
 	QueryExecutorOutput struct {
 		Cols []string
@@ -57,7 +57,6 @@ func QueryExecutor(ctx workflow.Context, input QueryExecutorInput) (*QueryExecut
 		Timeout:    time.Second * 15,
 		KeeperHost: input.KeeperHost,
 		Cluster:    input.Cluster,
-		NodeSize:   input.NodeSize,
 	}, time.Second*6)
 	if err != nil {
 		return nil, fmt.Errorf("error in SpawnNodes: %w", err)
@@ -99,9 +98,9 @@ func QueryExecutor(ctx workflow.Context, input QueryExecutorInput) (*QueryExecut
 
 type (
 	SpawnNodesInput struct {
-		NumNodes                      int
-		Timeout                       time.Duration
-		KeeperHost, Cluster, NodeSize string
+		Timeout                      time.Duration
+		KeeperHost, Cluster, CPUKind string
+		MemoryMB, Cores, NumNodes    int64
 	}
 	SpawnedNodes struct {
 		Machines []*fly.FlyMachine
@@ -123,7 +122,7 @@ func (ac *QueryExecutorActivities) SpawnNodes(ctx context.Context, input SpawnNo
 	var responses []AsyncFlyMachine
 
 	remoteReplicas := ""
-	for i := 0; i < input.NumNodes; i++ {
+	for i := 0; i < int(input.NumNodes); i++ {
 		nodeName := fmt.Sprintf("%s-%d", namePrefix, i)
 		remoteReplicas += fmt.Sprintf("<replica><host>%s.name.kv._metadata.%s.internal</host><port>9000</port></replica>", nodeName, utils.FLY_APP)
 	}
@@ -131,10 +130,10 @@ func (ac *QueryExecutorActivities) SpawnNodes(ctx context.Context, input SpawnNo
 	shard := utils.GenRandomShortID()
 
 	// Create machines
-	for i := 0; i < input.NumNodes; i++ {
+	for i := 0; i < int(input.NumNodes); i++ {
 		go func(ctx context.Context, c chan AsyncFlyMachine, i int) {
 			nodeName := fmt.Sprintf("%s-%d", namePrefix, i)
-			machine, err := fly.CreateFullCHMachine(ctx, nodeName, "iad", input.KeeperHost, "2181", remoteReplicas, shard, input.Cluster, nodeName, input.NodeSize)
+			machine, err := fly.CreateFullCHMachine(ctx, nodeName, "ams", input.KeeperHost, "2181", remoteReplicas, shard, input.Cluster, nodeName, input.CPUKind, input.Cores, input.MemoryMB)
 			if err != nil {
 				logger.Error().Err(err).Int("index", i).Msg("error spawning fly machine")
 			}
@@ -146,7 +145,7 @@ func (ac *QueryExecutorActivities) SpawnNodes(ctx context.Context, input SpawnNo
 	}
 
 	// Collect responses
-	for i := 0; i < input.NumNodes; i++ {
+	for i := 0; i < int(input.NumNodes); i++ {
 		res := <-rc
 		responses = append(responses, res)
 	}
@@ -165,9 +164,9 @@ func (ac *QueryExecutorActivities) SpawnNodes(ctx context.Context, input SpawnNo
 // TODO: optimize input
 type (
 	WaitAndQueryInput struct {
-		Machines    []*fly.FlyMachine
-		Query       string
-		InitQueries []string
+		Machines                    []*fly.FlyMachine
+		Query                       string
+		InitQueries, InitQueriesAll []string
 	}
 	WaitAndQueryOutput struct {
 		Runtime time.Duration
@@ -300,29 +299,20 @@ func (ac *QueryExecutorActivities) WaitAndQuery(ctx context.Context, input WaitA
 	}
 
 	// Run init queries
-	// for _, query := range input.InitQueries {
-	// 	rows, err := savedConn.Query(ctx, input.Query)
-	//
-	// 	cols := rows.Columns()
-	// 	var outRows []any
-	//
-	// 	for rows.Next() {
-	// 		row := make([]any, 0)
-	// 		types := rows.ColumnTypes()
-	// 		for _, t := range types {
-	// 			row = append(row, reflect.New(t.ScanType()).Interface())
-	// 		}
-	//
-	// 		err := rows.Scan(row...)
-	// 		if err != nil {
-	// 			return nil, fmt.Errorf("error in rows.Scan: %w", err)
-	// 		}
-	//
-	// 		outRows = append(outRows, row)
-	// 	}
-	// }
+	for idx, query := range input.InitQueries {
+		s := time.Now()
+		err = savedConn.Exec(ctx, query)
+		if err != nil {
+			return nil, fmt.Errorf("error in init query %d: %w", idx, err)
+		}
+		logger.Debug().Msgf("Init query %d ran in %s", idx, time.Since(s))
+	}
 
+	s = time.Now()
 	rows, err := savedConn.Query(ctx, input.Query)
+	if err != nil {
+		return nil, fmt.Errorf("error in Query: %w", err)
+	}
 
 	cols := rows.Columns()
 

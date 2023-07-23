@@ -1,0 +1,37 @@
+### Create a machine
+POST https://api.machines.dev/v1/apps/test-bighouse-t/machines
+Content-Type: application/json
+Authorization: Bearer xxx
+
+{
+  "name": "ch-0",
+  "region": "cdg",
+  "config": {
+    "image": "clickhouse/clickhouse-server",
+    "guest": {
+      "cpu_kind": "performance",
+      "cpus": 16,
+      "memory_mb": 131072
+    },
+    "services": [
+      {
+        "ports": [
+          {
+            "port": 9000
+          }
+        ],
+        "protocol": "tcp",
+        "internal_port": 9000
+      },
+      {
+        "ports": [
+          {
+            "port": 8123
+          }
+        ],
+        "protocol": "tcp",
+        "internal_port": 8123
+      }
+    ]
+  }
+}
