@@ -29,6 +29,10 @@ PRETTY=1
 TEMPORAL_URL=localhost:7233
 ```
 
+## Web Table Performance
+
+With web tables, I am observing 70-150M rows/s per node with 16vCPU nodes. I believe when the data is located together over 200M rows/s per node can be achieved easily.
+
 ## Primitive Performance Test
 
 96 CSV files:
