@@ -45,7 +45,7 @@ SELECT sum(commits), event_type FROM github_events group by event_type
 6 nodes: Query complete in in 5.938549286s
 10 nodes: Query complete in in 4.186387433s
 20 nodes: Query complete in in 4.114086397s
-30 nodes: 
+30 nodes: Query complete in in 9.618825346s (it was hard to even get these)
 ```
 
 ### Table of observations (not run with BigHouse, but just clustering in general)
