@@ -75,7 +75,7 @@ Elapsed: 4.994 sec. Processed 5.06 billion rows, 25.30 GB (1.01 billion rows/s.,
 
 As you can see with extremely fast queries, the overhead of distributing the work seems to degrade performance by half. This is also a simpler operation. This is probably also exacerbated by the distance to S3.
 
-The worst performing query (ec2 in eu-central-1), but highlights max parallelism:
+The worst performing query (ec2 in eu-central-1), but highlights max parallelism (thanks to Alexey for testing this):
 
 ```
 SELECT sum(cityHash64(*)) FROM github_events
