@@ -69,9 +69,11 @@ func (s *UnitTestSuite) TestQueryExecutorWorkflow() {
 	shortStmt = shortStmt
 
 	s.env.ExecuteWorkflow(QueryExecutor, QueryExecutorInput{
-		NumNodes:    6,
-		Query:       "select uniq(repo_name) from github_events_all settings max_parallel_replicas=6",
-		KeeperHost:  "2865603fe67558.vm.test-bighouse-t-keeper.internal",
+		NumNodes: 6,
+		Query:    "select 1",
+		// Query:    "select sum(commits), repo_name from github_events_all group by repo_name settings max_parallel_replicas=1, allow_experimental_parallel_reading_from_replicas=0, prefer_localhost_replica=1, max_bytes_before_external_group_by=16384000000",
+		// Query:       "select 1",
+		KeeperHost:  "d891d64c621628.vm.test-bighouse-t-keeper.internal",
 		Cluster:     utils.GenRandomAlpha(""),
 		CPUKind:     "performance",
 		Cores:       16,
@@ -79,7 +81,7 @@ func (s *UnitTestSuite) TestQueryExecutorWorkflow() {
 		DeleteNodes: false,
 		InitQueries: []string{
 			"ATTACH TABLE github_events UUID '127f4241-4a9b-4ecd-8a84-846b88069cb5' on cluster '{cluster}' \n(\n    `file_time` DateTime,\n    `event_type` Enum8('CommitCommentEvent' = 1, 'CreateEvent' = 2, 'DeleteEvent' = 3, 'ForkEvent' = 4, 'GollumEvent' = 5, 'IssueCommentEvent' = 6, 'IssuesEvent' = 7, 'MemberEvent' = 8, 'PublicEvent' = 9, 'PullRequestEvent' = 10, 'PullRequestReviewCommentEvent' = 11, 'PushEvent' = 12, 'ReleaseEvent' = 13, 'SponsorshipEvent' = 14, 'WatchEvent' = 15, 'GistEvent' = 16, 'FollowEvent' = 17, 'DownloadEvent' = 18, 'PullRequestReviewEvent' = 19, 'ForkApplyEvent' = 20, 'Event' = 21, 'TeamAddEvent' = 22),\n    `actor_login` LowCardinality(String),\n    `repo_name` LowCardinality(String),\n    `created_at` DateTime,\n    `updated_at` DateTime,\n    `action` Enum8('none' = 0, 'created' = 1, 'added' = 2, 'edited' = 3, 'deleted' = 4, 'opened' = 5, 'closed' = 6, 'reopened' = 7, 'assigned' = 8, 'unassigned' = 9, 'labeled' = 10, 'unlabeled' = 11, 'review_requested' = 12, 'review_request_removed' = 13, 'synchronize' = 14, 'started' = 15, 'published' = 16, 'update' = 17, 'create' = 18, 'fork' = 19, 'merged' = 20),\n    `comment_id` UInt64,\n    `body` String,\n    `path` String,\n    `position` Int32,\n    `line` Int32,\n    `ref` LowCardinality(String),\n    `ref_type` Enum8('none' = 0, 'branch' = 1, 'tag' = 2, 'repository' = 3, 'unknown' = 4),\n    `creator_user_login` LowCardinality(String),\n    `number` UInt32,\n    `title` String,\n    `labels` Array(LowCardinality(String)),\n    `state` Enum8('none' = 0, 'open' = 1, 'closed' = 2),\n    `locked` UInt8,\n    `assignee` LowCardinality(String),\n    `assignees` Array(LowCardinality(String)),\n    `comments` UInt32,\n    `author_association` Enum8('NONE' = 0, 'CONTRIBUTOR' = 1, 'OWNER' = 2, 'COLLABORATOR' = 3, 'MEMBER' = 4, 'MANNEQUIN' = 5),\n    `closed_at` DateTime,\n    `merged_at` DateTime,\n    `merge_commit_sha` String,\n    `requested_reviewers` Array(LowCardinality(String)),\n    `requested_teams` Array(LowCardinality(String)),\n    `head_ref` LowCardinality(String),\n    `head_sha` String,\n    `base_ref` LowCardinality(String),\n    `base_sha` String,\n    `merged` UInt8,\n    `mergeable` UInt8,\n    `rebaseable` UInt8,\n    `mergeable_state` Enum8('unknown' = 0, 'dirty' = 1, 'clean' = 2, 'unstable' = 3, 'draft' = 4),\n    `merged_by` LowCardinality(String),\n    `review_comments` UInt32,\n    `maintainer_can_modify` UInt8,\n    `commits` UInt32,\n    `additions` UInt32,\n    `deletions` UInt32,\n    `changed_files` UInt32,\n    `diff_hunk` String,\n    `original_position` UInt32,\n    `commit_id` String,\n    `original_commit_id` String,\n    `push_size` UInt32,\n    `push_distinct_size` UInt32,\n    `member_login` LowCardinality(String),\n    `release_tag_name` String,\n    `release_name` String,\n    `review_state` Enum8('none' = 0, 'approved' = 1, 'changes_requested' = 2, 'commented' = 3, 'dismissed' = 4, 'pending' = 5)\n)\nENGINE = MergeTree\nORDER BY (event_type, repo_name, created_at)\nSETTINGS disk = disk(type = web, endpoint = 'http://clickhouse-public-datasets.s3.amazonaws.com/web/')",
-			"create table github_events_all on cluster '{cluster}' as github_events ENGINE = Distributed('{cluster}', default, github_events)",
+			"SET allow_experimental_parallel_reading_from_replicas = 1, use_hedged_requests = 0, prefer_localhost_replica = 0, max_parallel_replicas = 10, cluster_for_parallel_replicas = '{cluster}', parallel_replicas_for_non_replicated_merge_tree = 1;)",
 		},
 	})
 

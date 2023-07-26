@@ -31,7 +31,69 @@ TEMPORAL_URL=localhost:7233
 
 ## Web Table Performance
 
-With web tables, I am observing 70-150M rows/s per node with 16vCPU nodes. I believe when the data is located together over 200M rows/s per node can be achieved easily.
+16vCPU 32GB fly machines (ams region) to S3 eu-central-1, 6 replicas
+
+```
+-- no replicas
+SELECT uniq(repo_name)
+FROM github_events
+SETTINGS max_parallel_replicas = 1, allow_experimental_parallel_reading_from_replicas = 0, prefer_localhost_replica = 1, parallel_replicas_for_non_replicated_merge_tree = 0
+
+1 row in set. Elapsed: 34.991 sec. Processed 5.06 billion rows, 10.09 GB (144.59 million rows/s., 288.43 MB/s.)
+
+-- enable parallel replicas
+SET allow_experimental_parallel_reading_from_replicas = 1, use_hedged_requests = 0, prefer_localhost_replica = 0, max_parallel_replicas = 10, cluster_for_parallel_replicas = '{cluster}', parallel_replicas_for_non_replicated_merge_tree = 1;
+
+-- with replicas
+SELECT uniq(repo_name)
+FROM github_events
+
+1 row in set. Elapsed: 14.015 sec. Processed 5.06 billion rows, 10.09 GB (360.99 million rows/s., 720.09 MB/s.)
+```
+
+Efficient query:
+
+```
+-- No replicas:
+SELECT sum(commits), event_type
+FROM github_events
+group by event_type
+SETTINGS max_parallel_replicas = 1, allow_experimental_parallel_reading_from_replicas = 0, prefer_localhost_replica = 1, parallel_replicas_for_non_replicated_merge_tree = 0
+
+Elapsed: 2.279 sec. Processed 5.06 billion rows, 25.30 GB (2.22 billion rows/s., 11.10 GB/s.)
+
+-- subsequent runs are faster due to caching:
+Elapsed: 1.841 sec. Processed 5.06 billion rows, 25.30 GB (2.75 billion rows/s., 13.74 GB/s.)
+
+-- Parallel replicas
+SELECT sum(commits), event_type
+FROM github_events
+group by event_type
+
+Elapsed: 4.994 sec. Processed 5.06 billion rows, 25.30 GB (1.01 billion rows/s., 5.07 GB/s.)
+```
+
+As you can see with extremely fast queries, the overhead of distributing the work seems to degrade performance by half. This is also a simpler operation. This is probably also exacerbated by the distance to S3.
+
+The worst performing query (ec2 in eu-central-1), but highlights max parallelism:
+
+```
+SELECT sum(cityHash64(*)) FROM github_events
+
+Without parallel replicas:
+1 row in set. Elapsed: 846.170 sec. Processed 5.06 billion rows, 2.76 TB (5.98 million rows/s., 3.26 GB/s.)
+
+With 50 parallel replicas:
+1 row in set. Elapsed: 18.719 sec. Processed 5.06 billion rows, 2.76 TB (270.28 million rows/s., 147.48 GB/s.)
+
+With 100 parallel replicas:
+1 row in set. Elapsed: 11.286 sec. Processed 5.06 billion rows, 2.76 TB (448.27 million rows/s., 244.61 GB/s.)
+
+SELECT sum(cityHash64(*)) FROM github_events
+SETTINGS max_parallel_replicas = 1, allow_experimental_parallel_reading_from_replicas = 0, prefer_localhost_replica = 1, parallel_replicas_for_non_replicated_merge_tree = 0
+```
+
+As you can see with fly, the bottleneck is network access. Once storage is within the local network (or very close, same country) then performance skyrockets even further
 
 ## Primitive Performance Test
 
@@ -86,3 +148,4 @@ fly wireguard create personal iad idkpeer
 ```
 
 Then use with wireguard app.
+
