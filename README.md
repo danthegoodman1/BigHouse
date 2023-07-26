@@ -1,5 +1,7 @@
 # BigHouse
 
+![bighouse](assets/bighouse-icon.png)
+
 ## Why (WIP)
 
 You can get way more resources. EC2 the largest realistic machine you will use is 192 cores (*6a.metal), and that’s insanely expensive to run ($7.344/hr), especially paying for idle, boot, and setup time.
