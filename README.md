@@ -35,6 +35,21 @@ TEMPORAL_URL=localhost:7233
 
 ### TLDR:
 
+16vCPU 32GB fly machines (ams region) to S3 eu-central-1
+
+```
+SELECT sum(commits), event_type FROM github_events group by event_type
+
+1 node: Query complete in in 32.29385382s
+4 nodes: Query complete in in 8.413694766s
+6 nodes: Query complete in in 5.938549286s
+10 nodes: Query complete in in 4.186387433s
+20 nodes: Query complete in in 4.114086397s
+30 nodes: 
+```
+
+### Table of observations (not run with BigHouse, but just clustering in general)
+
 | Query                                                                    | Single node                                                                                         | Cluster                                                                                                                                                                                                                                                                                   | Notes                                                                                  |
 |--------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------|
 | `SELECT uniq(repo_name) FROM github_events`                              | `Elapsed: 34.991 sec. Processed 5.06 billion rows, 10.09 GB (144.59 million rows/s., 288.43 MB/s.)` | `Elapsed: 14.015 sec. Processed 5.06 billion rows, 10.09 GB (360.99 million rows/s., 720.09 MB/s.)`                                                                                                                                                                                       | 16vCPU 32GB fly machines (ams region) to S3 eu-central-1, 6 replicas                   |

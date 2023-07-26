@@ -86,7 +86,11 @@ func doFlyMachineReq(ctx context.Context, path, method string, body []byte) (*Fl
 
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, res.StatusCode, fmt.Errorf("error in http.Do: %w", err)
+		sc := 0
+		if res != nil {
+			sc = res.StatusCode
+		}
+		return nil, sc, fmt.Errorf("error in http.Do: %w", err)
 	}
 
 	resBody, err := io.ReadAll(res.Body)

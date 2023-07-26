@@ -46,14 +46,14 @@ func QueryExecutor(ctx workflow.Context, input QueryExecutorInput) (*QueryExecut
 	var ac *QueryExecutorActivities
 
 	// Get keeper info
-	// keeperInfo, err := execLocalActivityIO(ctx, ac.GetKeeperInfo, GetKeeperInfoIn{}, time.Second*5)
+	// keeperInfo, err := execActivityIO(ctx, ac.GetKeeperInfo, GetKeeperInfoIn{}, time.Second*5)
 	// if err != nil {
 	// 	return nil, fmt.Errorf("error in GetKeeperInfo: %w", err)
 	// }
 
 	// Create nodes and boostrap the cluster
-	createdNodes, err := execLocalActivityIO(ctx, ac.SpawnNodes, SpawnNodesInput{
-		Timeout:    time.Second * 15,
+	createdNodes, err := execActivityIO(ctx, ac.SpawnNodes, SpawnNodesInput{
+		Timeout:    time.Second * 60,
 		KeeperHost: input.KeeperHost,
 		Cluster:    input.Cluster,
 		CPUKind:    input.CPUKind,
@@ -70,7 +70,7 @@ func QueryExecutor(ctx workflow.Context, input QueryExecutorInput) (*QueryExecut
 	if input.DeleteNodes {
 		defer func() {
 			// Clean nodes
-			err = execLocalActivity(ctx, ac.DeleteNodes, DeleteNodesInput{IDs: lo.Map(createdNodes.Machines, func(item *fly.FlyMachine, index int) string {
+			err = execActivity(ctx, ac.DeleteNodes, DeleteNodesInput{IDs: lo.Map(createdNodes.Machines, func(item *fly.FlyMachine, index int) string {
 				return item.Id
 			})}, time.Minute)
 			if err != nil {
@@ -81,7 +81,7 @@ func QueryExecutor(ctx workflow.Context, input QueryExecutorInput) (*QueryExecut
 
 	// Wait for nodes to be ready and query
 	logger.Debug().Msg("waiting for ch ready...")
-	queryRes, err := execLocalActivityIO(ctx, ac.WaitAndQuery, *&WaitAndQueryInput{
+	queryRes, err := execActivityIO(ctx, ac.WaitAndQuery, *&WaitAndQueryInput{
 		Machines:    createdNodes.Machines,
 		Query:       input.Query,
 		InitQueries: input.InitQueries,
