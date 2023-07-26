@@ -53,7 +53,7 @@ func QueryExecutor(ctx workflow.Context, input QueryExecutorInput) (*QueryExecut
 
 	// Create nodes and boostrap the cluster
 	createdNodes, err := execActivityIO(ctx, ac.SpawnNodes, SpawnNodesInput{
-		Timeout:    time.Second * 60,
+		Timeout:    time.Second * 120,
 		KeeperHost: input.KeeperHost,
 		Cluster:    input.Cluster,
 		CPUKind:    input.CPUKind,
@@ -119,8 +119,6 @@ func (ac *QueryExecutorActivities) SpawnNodes(ctx context.Context, input SpawnNo
 	logger := zerolog.Ctx(ctx)
 	rc := make(chan AsyncFlyMachine, input.NumNodes)
 	namePrefix := utils.GenRandomAlpha("")
-	tc, cancel := context.WithTimeout(ctx, input.Timeout)
-	defer cancel()
 
 	var responses []AsyncFlyMachine
 
@@ -144,7 +142,7 @@ func (ac *QueryExecutorActivities) SpawnNodes(ctx context.Context, input SpawnNo
 				Err:     err,
 				Machine: machine,
 			}
-		}(tc, rc, i)
+		}(ctx, rc, i)
 	}
 
 	// Collect responses
