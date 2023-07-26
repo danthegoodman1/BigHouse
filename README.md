@@ -33,6 +33,15 @@ TEMPORAL_URL=localhost:7233
 
 ## Web Table Performance
 
+### TLDR:
+
+| Query                                                                    | Single node                                                                                         | Cluster                                                                                                                                                                                                                                                                                   | Notes                                                                                  |
+|--------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------|
+| `SELECT uniq(repo_name) FROM github_events`                              | `Elapsed: 34.991 sec. Processed 5.06 billion rows, 10.09 GB (144.59 million rows/s., 288.43 MB/s.)` | `Elapsed: 14.015 sec. Processed 5.06 billion rows, 10.09 GB (360.99 million rows/s., 720.09 MB/s.)`                                                                                                                                                                                       | 16vCPU 32GB fly machines (ams region) to S3 eu-central-1, 6 replicas                   |
+| `SELECT sum(commits), event_type FROM github_events group by event_type` | `Elapsed: 2.279 sec. Processed 5.06 billion rows, 25.30 GB (2.22 billion rows/s., 11.10 GB/s.)`     | `Elapsed: 4.994 sec. Processed 5.06 billion rows, 25.30 GB (1.01 billion rows/s., 5.07 GB/s.)`                                                                                                                                                                                            | Slowdown either due to coordination overhead and/or distance from S3                   |
+| `SELECT sum(cityHash64(*)) FROM github_events`                           | `Elapsed: 846.170 sec. Processed 5.06 billion rows, 2.76 TB (5.98 million rows/s., 3.26 GB/s.)`     | With 50 parallel replicas: `1 row in set. Elapsed: 18.719 sec. Processed 5.06 billion rows, 2.76 TB (270.28 million rows/s., 147.48 GB/s.)`  With 100 parallel replicas: `1 row in set. Elapsed: 11.286 sec. Processed 5.06 billion rows, 2.76 TB (448.27 million rows/s., 244.61 GB/s.)` | m5.8xlarge in AWS with VPC endpoint, shows ideal in-network performance is near linear |
+
+
 16vCPU 32GB fly machines (ams region) to S3 eu-central-1, 6 replicas
 
 ```
