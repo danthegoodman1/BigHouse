@@ -121,6 +121,10 @@ SETTINGS max_parallel_replicas = 1, allow_experimental_parallel_reading_from_rep
 
 As you can see with fly, the bottleneck is network access. Once storage is within the local network (or very close, same country) then performance skyrockets even further
 
+## How does it work
+
+![flow](assets/bighouse-flow.png)
+
 ## Primitive Performance Test
 
 96 CSV files:
