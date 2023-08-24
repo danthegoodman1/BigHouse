@@ -33,6 +33,8 @@ TEMPORAL_URL=localhost:7233
 
 ## Web Table Performance
 
+`max_download_threads` and `max_download_buffer_size` will determine how concurrent downloading files are with `s3(Cluster)`
+
 ### TLDR:
 
 16vCPU 32GB fly machines (ams region) to S3 eu-central-1
