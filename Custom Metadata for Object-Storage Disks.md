@@ -76,14 +76,14 @@ MergeTree needs one atomic step, a directory rename, and builds every change on 
 
 | Change | How it lands | After a crash |
 | --- | --- | --- |
-| Insert | Writes `tmp_insert_<part>/`, then renames it to the part's name | Startup deletes `tmp_*` directories (`clearOldTemporaryDirectories`, `ClickHouse/src/Storages/MergeTree/MergeTreeData.cpp:4697`) |
+| Insert | Writes `tmp_insert_<part>/`, then renames it to the part's name | Startup deletes `tmp_*` directories (`clearOldTemporaryDirectories`, `ClickHouse/src/Storages/MergeTree/MergeTreeData.cpp:4323`) |
 | Merge | Writes the output in a temporary directory and renames it; the inputs stay | The name records the block range, so `all_1_5_1` covers `all_1_1_0` to `all_5_5_0`; startup keeps the covering parts active (`loadDataParts`, line 2771) |
 | Mutation | Writes a new part, hardlinking unchanged files, then renames it | As for an insert |
 | Removal | Renames the part to `delete_tmp_<part>`, then deletes it | Startup clears what is left |
 
-Object-storage disks rely on the same step. `MetadataOperationsHolder::commit` (`ClickHouse/src/Disks/DiskObjectStorage/MetadataStorages/MetadataOperationsHolder.cpp:68`) runs its operations one at a time and rolls back only on an exception. A crash midway leaves partial metadata, which is safe because the rename comes last.
+Object-storage disks rely on the same step. `MetadataOperationsHolder::commit` (`ClickHouse/src/Disks/DiskObjectStorage/MetadataStorages/MetadataOperationsHolder.cpp:73`) runs its operations one at a time and rolls back only on an exception. A crash midway leaves partial metadata, which is safe because the rename comes last.
 
-**When an insert returns.** A synchronous `INSERT` returns after every part it wrote is renamed and active. `MergeTreeSink::finishDelayedChunk` (`ClickHouse/src/Storages/MergeTree/MergeTreeSink.cpp:292`) finishes each part's files, commits the disk's metadata transaction, then calls `renameTempPartAndAdd` (line 449). The sink commits the last chunk's parts in `onFinish`, and the query answers after that.
+**When an insert returns.** A synchronous `INSERT` returns after every part it wrote is renamed and active. `MergeTreeSink::finishDelayedChunk` (`ClickHouse/src/Storages/MergeTree/MergeTreeSink.cpp:292`) finishes each part's files, commits the disk's metadata transaction, then calls `renameTempPartAndAdd` (line 459). The sink commits the last chunk's parts in `onFinish`, and the query answers after that.
 
 - **Parts commit one at a time.** An insert that fails midway leaves the parts it already renamed. A plain `MergeTree` retry writes those rows again unless `non_replicated_deduplication_window` is set; it defaults to 0.
 - **Renamed is not yet durable.** The rename may sit in the page cache until `fsync_after_insert` and `fsync_part_directory` are set.
@@ -130,7 +130,7 @@ A part can reach your store in one transaction, at its rename, if the metadata l
 
 1. `commitTransaction` sends the temporary directory and every file's record in one metadata commit.
 2. `MergeTreeSink::commitPart` takes the parts lock and assigns the block number, and with it the part's final name.
-3. `DataPartStorageOnDiskBase::rename` (`ClickHouse/src/Storages/MergeTree/DataPartStorageOnDiskBase.cpp:719`) calls `existsDirectory`, `setLastModified` and `moveDirectory`, each on its own.
+3. `DataPartStorageOnDiskBase::rename` (`ClickHouse/src/Storages/MergeTree/DataPartStorageOnDiskBase.cpp:738`) calls `existsDirectory`, `setLastModified` and `moveDirectory`, each on its own.
 
 The lock lets a table publish one part at a time, so the store's latency caps the table's part rate. At 5 ms a round trip, three calls hold the lock for 15 ms, about 65 parts a second; one call triples that.
 
@@ -295,15 +295,15 @@ In the Default column, **required** means a pure virtual, **throws** means the d
 
 ## Read replicas with one writer
 
-Stock MergeTree already runs one writer and any number of read replicas on such a disk. Each replica configures the disk read-only and sets `refresh_parts_interval`, whose documentation names shared metadata as the requirement (`ClickHouse/src/Storages/MergeTree/registerStorageMergeTree.cpp:2428`).
+Stock MergeTree already runs one writer and any number of read replicas on such a disk. Each replica configures the disk read-only and sets `refresh_parts_interval`, whose documentation names shared metadata as the requirement (`ClickHouse/src/Storages/MergeTree/registerStorageMergeTree.cpp:2503`).
 
-Each refresh (`refreshDataPartsOnce`, `ClickHouse/src/Storages/MergeTree/MergeTreeData.cpp:3206`) works in three steps:
+Each refresh (`refreshDataPartsOnce`, `ClickHouse/src/Storages/MergeTree/MergeTreeData.cpp:3535`) works in three steps:
 
 1. It asks the disk to reload its metadata (`refresh`).
 2. It lists the table's directory.
 3. It loads parts it has not seen, keeping only covering ones, so a merged part makes its inputs outdated on the replica.
 
-Your store improves on `plain_rewritable` with real hardlinks. `plain_rewritable` copies the object when MergeTree asks for a hardlink (`MetadataStorageFromPlainRewritableObjectStorage.cpp:538`), so mutations, `ATTACH PARTITION FROM` and `FREEZE` copy data in S3; reference-counted hardlinks change only metadata.
+Your store improves on `plain_rewritable` with real hardlinks. `plain_rewritable` copies the object when MergeTree asks for a hardlink (`MetadataStorageFromPlainRewritableObjectStorage.cpp:1334`), so mutations, `ATTACH PARTITION FROM` and `FREEZE` copy data in S3; reference-counted hardlinks change only metadata.
 
 | Gap in the replicas | What happens |
 | --- | --- |

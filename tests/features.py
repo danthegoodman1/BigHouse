@@ -33,8 +33,13 @@ def make_server() -> stack.Server:
             stack.local_metadata_disk_xml("s3_local", s3_prefix=f"features/{run}/local"),
             stack.inodedb_disk_xml("s3_inodedb", s3_prefix=f"features/{run}/inodedb", key=key),
             f"<backups_disk><type>local</type><path>{stack.DEV}/servers/features-{run}/backups/</path></backups_disk>",
+            # Each metadata type also under the `cache` and `encrypted` wrappers.
+            *(f"""<{d}_cache><type>cache</type><disk>{d}</disk><path>{stack.DEV}/servers/features-{run}/cache_{d}/</path><max_size>1Gi</max_size></{d}_cache>
+                <{d}_encrypted><type>encrypted</type><disk>{d}_cache</disk><key>1234567812345678</key><path>encrypted/</path></{d}_encrypted>"""
+              for d in DISKS.values()),
         ],
         policies=[stack.policy_xml(p, DISKS[p]) for p in POLICIES]
+        + [stack.policy_xml(f"{p}_encrypted", f"{DISKS[p]}_encrypted") for p in POLICIES]
         + ["<tiered><volumes><hot><disk>default</disk></hot><cold><disk>s3_inodedb</disk></cold></volumes></tiered>"],
         extra_config="<backups><allowed_disk>backups_disk</allowed_disk><allowed_path>/</allowed_path></backups>",
     )
@@ -157,6 +162,39 @@ def scenario_backup(s: stack.Server, p: str) -> list[str]:
     s.query("DROP TABLE t SYNC")
     s.query(f"RESTORE TABLE t FROM Disk('backups_disk', '{name}')")
     return [s.query("SELECT count(), sum(k) FROM t"), s.query(f"SELECT all(disk_name = '{DISKS[p]}') FROM system.parts WHERE table = 't' AND active")]
+
+
+def scenario_cache_and_encryption(s: stack.Server, p: str) -> list[str]:
+    s.query(f"CREATE TABLE t (k UInt64, v String) ENGINE = MergeTree ORDER BY k SETTINGS storage_policy = '{p}_encrypted'")
+    for i in range(3):
+        s.query(f"INSERT INTO t SELECT number + {i * 1000}, toString(number) FROM numbers(1000)")
+    s.query("OPTIMIZE TABLE t FINAL")
+    s.query("ALTER TABLE t UPDATE v = 'x' WHERE k % 7 = 0", settings={"mutations_sync": 2})
+    s.query("SYSTEM DROP FILESYSTEM CACHE")
+    return [s.query("SELECT count(), sum(k), countIf(v = 'x') FROM t"), s.query("CHECK TABLE t")]
+
+
+def scenario_lightweight_update(s: stack.Server, p: str) -> list[str]:
+    s.query(f"""CREATE TABLE t (k UInt64, v UInt64) ENGINE = MergeTree ORDER BY k
+        SETTINGS storage_policy = '{p}', enable_block_number_column = 1, enable_block_offset_column = 1""")
+    s.query("INSERT INTO t SELECT number, number FROM numbers(10000)")
+    s.query("UPDATE t SET v = v * 10 WHERE k % 3 = 0")
+    out = [s.query("SELECT sum(v), count() FROM t")]
+    s.query("OPTIMIZE TABLE t FINAL")
+    out += [s.query("SELECT sum(v), count() FROM t"), s.query("CHECK TABLE t")]
+    return out
+
+
+def scenario_backup_to_s3(s: stack.Server, p: str) -> list[str]:
+    s.query(f"CREATE TABLE t (k UInt64, v String) ENGINE = MergeTree ORDER BY k SETTINGS storage_policy = '{p}'")
+    s.query("INSERT INTO t SELECT number, toString(number) FROM numbers(5000)")
+    s.query("INSERT INTO t SELECT number + 5000, toString(number) FROM numbers(5000)")
+    url = f"{stack.S3_ENDPOINT}/{stack.S3_BUCKET}/feature-backups/{uuid.uuid4().hex}"
+    target = f"S3('{url}', '{stack.S3_ACCESS_KEY}', '{stack.S3_SECRET_KEY}')"
+    s.query(f"BACKUP TABLE t TO {target}")
+    s.query("DROP TABLE t SYNC")
+    s.query(f"RESTORE TABLE t FROM {target}")
+    return [s.query("SELECT count(), sum(k), max(v) FROM t"), s.query("CHECK TABLE t")]
 
 
 def scenario_move_between_disks(s: stack.Server, p: str) -> list[str]:

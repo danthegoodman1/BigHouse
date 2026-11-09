@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""Benchmarks `inodedb` metadata against `local` metadata on one server over s3proxy.
+
+Three disks take the same work: `local` metadata, `inodedb` metadata, and `inodedb` with inline files off.
+
+- Inserts: small inserts one after another, then the same number from 8 threads, with merges stopped. Reports
+  inserts per second, and object-storage writes and InodeDB commits per insert.
+- Cold start: a table of many parts on each disk in turn. Restarts the server with only that table attached and
+  reports the seconds until the table answers, and object-storage and InodeDB reads during the load.
+
+    python3 tests/bench.py [--inserts N] [--parts N]
+
+Prints a Markdown table and writes .dev/bench/results.json. Needs `scripts/dev-up` and a built server.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from bighouse import stack  # noqa: E402
+
+DISKS = ("local", "inodedb", "inodedb_blobs")
+WRITES = ("DiskS3PutObject", "DiskS3CreateMultipartUpload", "DiskS3UploadPart")
+READS = ("DiskS3GetObject", "DiskS3HeadObject")
+INODEDB_READS = ("InodeDBStat", "InodeDBRead", "InodeDBList")
+
+
+def make_server(run: str) -> stack.Server:
+    prefix = f"bench/{run}"
+    return stack.Server(
+        name=f"bench-{run}",
+        tcp_port=19700,
+        http_port=18800,
+        interserver_port=19709,
+        disks=[
+            stack.local_metadata_disk_xml("local", s3_prefix=f"{prefix}/local"),
+            stack.inodedb_disk_xml("inodedb", s3_prefix=f"{prefix}/inodedb", key=stack.mint_key(f"{prefix}/inodedb", "write")),
+            stack.inodedb_disk_xml("inodedb_blobs", s3_prefix=f"{prefix}/inodedb_blobs", key=stack.mint_key(f"{prefix}/inodedb_blobs", "write"),
+                                   extra="<inodedb_inline_file_max_bytes>0</inodedb_inline_file_max_bytes>"),
+        ],
+        policies=[stack.policy_xml(disk, disk) for disk in DISKS],
+    )
+
+
+def events(server: stack.Server, names: tuple[str, ...]) -> int:
+    listed = ", ".join(f"'{name}'" for name in names)
+    return int(server.value(f"SELECT sum(value) FROM system.events WHERE event IN ({listed})") or 0)
+
+
+def bench_inserts(server: stack.Server, disk: str, count: int) -> dict[str, float]:
+    table = f"bench.inserts_{disk}"
+    server.query(f"CREATE TABLE {table} (k UInt64, v String, t DateTime) ENGINE = MergeTree ORDER BY k "
+                 f"SETTINGS storage_policy = '{disk}', parts_to_throw_insert = 100000, parts_to_delay_insert = 100000")
+    server.query(f"SYSTEM STOP MERGES {table}")
+    insert = f"INSERT INTO {table} SELECT number, toString(number), now() FROM numbers(1000)"
+    result = {}
+
+    writes, commits = events(server, WRITES), events(server, ("InodeDBCommit",))
+    started = time.monotonic()
+    for _ in range(count):
+        server.query(insert)
+    result["sequential_inserts_per_s"] = count / (time.monotonic() - started)
+    result["writes_per_insert"] = (events(server, WRITES) - writes) / count
+    result["commits_per_insert"] = (events(server, ("InodeDBCommit",)) - commits) / count
+
+    started = time.monotonic()
+    with ThreadPoolExecutor(8) as pool:
+        list(pool.map(lambda _: server.query(insert), range(count)))
+    result["parallel_inserts_per_s"] = count / (time.monotonic() - started)
+
+    assert server.value(f"SELECT count() FROM {table}") == str(2 * count * 1000)
+    return result
+
+
+def fill_parts(server: stack.Server, disk: str, parts: int) -> None:
+    """A table of `parts` one-row parts, written by 16 inserts at once."""
+    table = f"bench.parts_{disk}"
+    server.query(f"CREATE TABLE {table} (k UInt64, v String) ENGINE = MergeTree PARTITION BY k ORDER BY k "
+                 f"SETTINGS storage_policy = '{disk}', parts_to_throw_insert = 1000000, parts_to_delay_insert = 1000000")
+    server.query(f"SYSTEM STOP MERGES {table}")
+    step = -(-parts // 16)
+
+    def insert(start: int) -> None:
+        server.query(f"INSERT INTO {table} SELECT number, toString(number) FROM numbers({start}, {min(step, parts - start)})",
+                     settings={"max_partitions_per_insert_block": 0, "throw_on_max_partitions_per_insert_block": 0})
+
+    with ThreadPoolExecutor(16) as pool:
+        list(pool.map(insert, range(0, parts, step)))
+    assert server.value(f"SELECT count() FROM system.parts WHERE database = 'bench' AND table = 'parts_{disk}' AND active") == str(parts)
+
+
+def bench_cold_start(server: stack.Server, disk: str, parts: int) -> dict[str, float]:
+    """Restarts the server with only `bench.parts_<disk>` attached and times its load."""
+    for other in DISKS:
+        if other != disk:
+            server.query(f"DETACH TABLE bench.parts_{other} PERMANENTLY")
+    server.stop()
+    started = time.monotonic()
+    server.start()
+    while True:
+        try:
+            if server.value(f"SELECT count() FROM bench.parts_{disk}") == str(parts):
+                break
+        except stack.QueryError:
+            pass
+        time.sleep(0.01)
+    result = {"cold_start_s": time.monotonic() - started, "reads_during_load": events(server, READS),
+              "inodedb_reads_during_load": events(server, INODEDB_READS)}
+    for other in DISKS:
+        if other != disk:
+            server.query(f"ATTACH TABLE bench.parts_{other}")
+    return result
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--inserts", type=int, default=200)
+    parser.add_argument("--parts", type=int, default=10_000)
+    args = parser.parse_args()
+
+    server = make_server(uuid.uuid4().hex[:8])
+    server.start()
+    results: dict[str, dict[str, float]] = {disk: {} for disk in DISKS}
+    try:
+        server.query("CREATE DATABASE bench")
+        for disk in DISKS:
+            results[disk] |= bench_inserts(server, disk, args.inserts)
+            print(f"{disk}: inserts {results[disk]}", flush=True)
+        for disk in DISKS:
+            started = time.monotonic()
+            fill_parts(server, disk, args.parts)
+            results[disk]["fill_parts_s"] = time.monotonic() - started
+            print(f"{disk}: {args.parts} parts in {results[disk]['fill_parts_s']:.1f} s", flush=True)
+        for disk in DISKS:
+            results[disk] |= bench_cold_start(server, disk, args.parts)
+            print(f"{disk}: cold start {results[disk]}", flush=True)
+    finally:
+        server.stop()
+        server.wipe()
+
+    out = stack.DEV / "bench/results.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({"inserts": args.inserts, "parts": args.parts, "results": results}, indent=1))
+
+    print(f"\n| Metadata | Inserts/s, 1 thread | Inserts/s, 8 threads | S3 writes per insert | InodeDB commits per insert "
+          f"| {args.parts:,} parts written (s) | Cold start (s) | S3 reads at load | InodeDB reads at load |")
+    print("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    for disk in DISKS:
+        r = results[disk]
+        print(f"| `{disk}` | {r['sequential_inserts_per_s']:.0f} | {r['parallel_inserts_per_s']:.0f} | {r['writes_per_insert']:.1f} "
+              f"| {r['commits_per_insert']:.1f} | {r['fill_parts_s']:.1f} | {r['cold_start_s']:.2f} | {r['reads_during_load']:,} "
+              f"| {r['inodedb_reads_during_load']:,} |")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
