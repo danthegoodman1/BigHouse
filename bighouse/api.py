@@ -1,11 +1,12 @@
-"""The BigHouse query API: each query summons a fleet, runs on it, and dismisses it.
+"""The BigHouse query API: each query takes a fleet of warm servers, assigns them to the disk, and runs on them.
 
     POST /query?replicas=N    the body is the SQL; the answer is ClickHouse's output
 
-The response's `X-BigHouse-Timings` header holds the fleet's start, attach, query and stop times in milliseconds,
-and `X-BigHouse-Replicas` the fleet size. `X-BigHouse-Left-Out` maps each of the writer's databases the fleet could
-not serve to the reason; a failed query's error names them too. A host runs as many fleet servers at once as it
-has slots; a query that finds too few free gets 503.
+The response's `X-BigHouse-Timings` header holds, in milliseconds, how long the query waited for servers still
+booting, assigned them, attached the databases and ran, and the total; `X-BigHouse-Replicas` holds the fleet size.
+`X-BigHouse-Left-Out` maps each of the writer's databases the fleet could not serve to the reason; a failed query's
+error names them too. A host runs as many fleet servers at once as it has slots; a query that finds too few slots
+free gets 503.
 
     python3 -m bighouse.api [--port 8080] [--slots 16]
 
@@ -16,10 +17,13 @@ writer's databases from InodeDB, so queries need nothing from the writer and kee
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import signal
 import sys
 import time
 import traceback
+from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -33,21 +37,47 @@ class Busy(RuntimeError):
 
 
 class QueryApi:
+    """Runs each query on a fleet from a pool of blank servers. Entering it boots the pool; leaving it stops it."""
+
     def __init__(self, config: dict, slots: int):
         self.config = config
-        self.pool = fleet.SlotPool(slots)
+        self.pool = fleet.Pool(slots)
+
+    def __enter__(self) -> QueryApi:
+        try:
+            self.pool.start()
+        except BaseException:
+            self.pool.close()
+            raise
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.pool.close()
+
+    @contextlib.contextmanager
+    def summon(self, replicas: int) -> Iterator[fleet.Fleet]:
+        """A fleet of `replicas` servers assigned to the disk. The pool replaces them once the block ends."""
+        started = time.monotonic()
+        servers = self.pool.take(replicas)
+        if servers is None:
+            raise Busy(f"fewer than {replicas} free slots")
+        waited = (time.monotonic() - started) * 1000
+        key = ""
+        try:
+            # A read key rooted at the disk: it can't write, and it lapses on its own if this process dies.
+            key = stack.mint_key(self.config["inodedb_root"], "read", ttl="15m")
+            summoned = fleet.Fleet(servers, s3_prefix=self.config["s3_prefix"], key=key)
+            summoned.timings["wait_ms"] = waited
+            summoned.assign()
+            yield summoned
+        finally:
+            # A server releases its InodeDB lease as it stops, which takes the key, so the key goes after.
+            self.pool.recycle(servers, then=(lambda: stack.idb("key", "revoke", key)) if key else None)
 
     def run(self, sql: str, replicas: int) -> tuple[str, dict[str, float], dict[str, str]]:
         """The query's answer, the fleet's timings, and why the fleet left out each database it could not serve."""
-        slots = self.pool.acquire(replicas)
-        if slots is None:
-            raise Busy(f"fewer than {replicas} free slots")
         started = time.monotonic()
-        # A read key rooted at the disk: it can't write, and it lapses on its own if this process dies.
-        key = stack.mint_key(self.config["inodedb_root"], "read", ttl="15m")
-        summoned = fleet.Fleet(slots, s3_prefix=self.config["s3_prefix"], key=key)
-        try:
-            summoned.start()
+        with self.summon(replicas) as summoned:
             try:
                 result = summoned.query(sql)
             except stack.QueryError as error:
@@ -55,10 +85,6 @@ class QueryApi:
                     raise
                 left_out = "; ".join(f"{name}: {why}" for name, why in summoned.left_out.items())
                 raise stack.QueryError(f"{error}\nThe fleet left out these databases: {left_out}") from None
-        finally:
-            summoned.stop()
-            self.pool.release(slots)
-            stack.idb("key", "revoke", key)
         summoned.timings["total_ms"] = (time.monotonic() - started) * 1000
         return result, summoned.timings, summoned.left_out
 
@@ -112,10 +138,13 @@ def main() -> int:
     if not CONFIG.exists():
         print(f"{CONFIG} is missing; run demo/up first", file=sys.stderr)
         return 1
-    api = QueryApi(json.loads(CONFIG.read_text()), args.slots)
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(api))
-    print(f"BigHouse query API on http://127.0.0.1:{args.port}/query with {args.slots} slots")
-    server.serve_forever()
+    # SIGTERM unwinds like Ctrl-C, so the pool stops its servers.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    with QueryApi(json.loads(CONFIG.read_text()), args.slots) as api:
+        server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(api))
+        print(f"BigHouse query API on http://127.0.0.1:{args.port}/query with {args.slots} warm slots", flush=True)
+        with contextlib.suppress(KeyboardInterrupt):
+            server.serve_forever()
     return 0
 
 

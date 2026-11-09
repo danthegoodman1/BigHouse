@@ -16,7 +16,7 @@ Each table has one writer. The demo runs on one machine with s3proxy standing in
 | `ClickHouse/src/Disks/DiskObjectStorage/MetadataStorages/InodeDB/` | The `inodedb` metadata type: gRPC client, value format, cache, storage and transaction. |
 | `inodedb/` | Submodule: InodeDB at the revision the client's `proto/inodedb.proto` copies. |
 | `scripts/` | `clickhouse-build`, `inodedb-build`, `dev-up`, `dev-down`. |
-| `bighouse/` | `stack.py` (keys, disk configs, servers), `catalog.py` (the writer's databases in InodeDB), `fleet.py` (slots and fleets), `api.py` (the query API). |
+| `bighouse/` | `stack.py` (keys, disk configs, servers), `catalog.py` (the writer's databases in InodeDB), `fleet.py` (slots, the pool of blank servers, and fleets), `api.py` (the query API). |
 | `tests/` | `features.py`, `crash.py`, `claims.py`, `fence.py`, `replicas.py`, `discovery.py`, `parity.py`, `bench.py`. |
 | `demo/` | `up`, `down`, `load`, `e2e.py`. |
 
@@ -55,7 +55,7 @@ Each table has one writer. The demo runs on one machine with s3proxy standing in
 - **Features.** `tests/features.py` runs each feature scenario on both metadata types in one server and requires equal answers, then checks restart and blob cleanup.
 - **Crash.** `tests/crash.py` kills the writer with `SIGKILL` under a mixed workload, restarts it, and checks `CHECK TABLE`, acknowledged batches, partial batches and blobs that records name.
 - **Replicas.** `tests/replicas.py`: a writer and a replica; new parts appear, drops vanish, and queries outlive the writer's cleanup.
-- **End to end.** `demo/e2e.py`: the query API returns the writer's answers at fleet sizes 1, 2 and 4.
+- **End to end.** `demo/e2e.py`: the query API returns the writer's answers at fleet sizes 1, 2, 4 and 8, and replaces each fleet's servers with blank ones.
 - **Benchmarks.** `tests/bench.py` against `local` metadata, with InodeDB's store on the drive and on tmpfs (`--tmpfs`), recorded in `BENCHMARKS.md`.
 - **CI.** GitHub Actions runs s3proxy and InodeDB, builds ClickHouse with a restored ccache, and runs the suites. The full stateless parity run runs on demand.
 
@@ -250,15 +250,15 @@ Status ledger:
 | Complete | Work | 5D: Reader leases | `InodeDBReaderLease` beats every 10 s, releases versions it read more than `inodedb_lease_lag_ms` ago, and releases the lease when the disk shuts down, cancelling its stream only after an attempt's deadline. `tests/replicas.py`: a slow replica query reads parts the writer merged away and deleted; no blob goes while the lease holds it, and the writer deletes them 0.2 s after the replica stops, within the test's 20 s bound and well inside the 30 s lease TTL. |
 | Complete | Work | 5E: Table discovery from InodeDB | Writers keep database definitions on the disk (`fleet.writer_config_xml`: `database_disk`). `bighouse/catalog.py` reads each database's UUID from `metadata/<name>.sql` in InodeDB under the fleet's read key, and the coordinator attaches each with `ATTACH DATABASE ... SETTINGS disk = 'bighouse'`, then detaches any database holding a table off the disk, a refreshable materialized view or another engine; the other servers attach the rest. A read-only `inodedb` disk commits a transaction that only creates existing directories, as attaching runs `createDirectories` (gtest `TestReplicaCreatesExistingDirectories`). `tests/discovery.py`: 21 of 21 checks, covering tables, views, materialized views and `default`, four kinds of left-out database with reasons, a left-out `default`, `ALTER ADD/DROP COLUMN`, table and database `CREATE`, `DROP` and `RENAME`, and a query with the writer down. `demo/e2e.py`: all checks, attach 22 to 45 ms, and a query with the writer down. |
 | Incomplete | Work | 5G: Schema changes reach long-lived replicas | A long-lived replica keeps the schema it attached with; each new fleet reads the current one (5E). Missing: reattaching on InodeDB `Watch` events under `metadata/` and `store/`, and an `ALTER` test against a running replica. |
-| Incomplete | Work | 5H: Warm fleet servers | Measured with four servers started ahead (10 runs each, p50): writing the fleet's `remote_servers` to `config.d` and running `SYSTEM RELOAD CONFIG` takes 8 to 11 ms, attaching 21 to 44 ms, so a fleet of 1, 2 or 4 is ready in 30 to 55 ms against 228 to 323 ms cold; `DROP DATABASE ... SYNC` clears a server in 7 to 10 ms and leaves the writer's data intact. A drop makes no InodeDB call. A server can also boot blank, with no `bighouse` disk and only the default policy's name in its boot config: one `SYSTEM RELOAD CONFIG` adds the disk, its policy and the cluster in 10 to 13 ms, the disk starts and takes its lease, and the server answers as the writer does after a 26 ms attach. A reload cannot remove a disk or change its key, so a server serves one tenant, and MergeTree's default policy must be in the boot config: added by the reload, it leaves tables on the local disk. Missing: a reset before each reattach. A warm server reattached after the writer inserted and ran `ALTER` still saw 1,000 rows of 1,500 and no new column, because a replica's metadata cache keeps listings until `refresh` and file records for good, and table definitions change in place. `SYSTEM CLEAR DISK METADATA CACHE` reaches `IMetadataStorage::dropCache`, a no-op for `inodedb`; it should clear the cache and move the lease to the newest version, since a replica's lease otherwise moves only on `refresh`. Also missing: a read key per warm server in place of one per query, and the pool in `bighouse/api.py`. |
-| Incomplete | Risk | Killed fleet servers hold blob deletion | `Fleet.stop` kills its servers, so each lease lasts until its 30 s TTL, and InodeDB's release horizon spans every lease: `tests/replicas.py` run right after `tests/discovery.py` saw the merged-away blobs go 13.2 s after its replica stopped, against 0.4 s alone. Missing: fleets that release their leases as they stop. |
+| Complete | Work | 5H: Warm fleet servers | `fleet.Pool` boots a blank server in every slot: its boot config holds no `bighouse` disk, no cluster and no key, and names `bighouse` as MergeTree's default policy, because MergeTree reads its defaults only at boot and resolves the name only when a table attaches. `Fleet.assign` writes `config.d/tenant.xml` (the read-only disk under the query's key, its policy, and the cluster of the fleet's servers) and runs `SYSTEM RELOAD CONFIG`, which starts the disk and its lease, then attaches the databases. Once the query ends, the pool stops each server with SIGTERM, revokes the key, and boots a blank server in the slot, in the background. Each server serves one query: a reload cannot remove a disk or change its key, and a reattached server would read stale listings and definitions, since `IMetadataStorage::dropCache` is a no-op for `inodedb`. `demo/e2e.py`: a fleet's servers stop once its query ends, the pool then holds a fresh blank server in every slot, and a query that needs servers still booting waits for them. With the pool settled between queries (10 runs, p50), a query takes 95, 112, 126 and 139 ms at 1, 2, 4 and 8 servers (assign 13 to 17 ms, attach 22 to 47 ms, query 48 to 59 ms), against 300 to 420 ms with servers started per query; 4 servers are replaced 437 ms after the answer, so back to back on 8 slots, fleets of 4 average 306 ms. |
+| Complete | Risk | Killed fleet servers hold blob deletion | InodeDB's release horizon spans every lease, so a killed fleet server, whose lease lasts until its 30 s TTL, holds back every deletion. The pool stops servers with SIGTERM, which releases their leases: `tests/replicas.py` run right after `tests/discovery.py` saw the merged-away blobs go 0.2 s after its replica stopped, against 13.2 s when fleets were killed. |
 | Complete | Work | 5F: Scoped read keys | `bighouse/api.py` mints a read key rooted at the writer's directory with a 15-minute TTL per query and revokes it after. `tests/fence.py`: a read key cannot write. |
 | In Progress | Gate | Replicas track the writer and keep their queries | `tests/replicas.py`: 10 of 10 checks pass, attaching the writer's database from InodeDB. `tests/discovery.py`: each new fleet sees the writer's `ALTER`. Missing: 5G, for a running replica. |
 
 ## Phase 6: The BigHouse Query API
 
 Goal:
-`demo/` runs on one machine: s3proxy, InodeDB, a writer ClickHouse, and a query API that starts a fleet of ClickHouse servers for each query, runs it with parallel replicas, returns the result, and stops the fleet.
+`demo/` runs on one machine: s3proxy, InodeDB, a writer ClickHouse, and a query API that assigns a fleet of warm ClickHouse servers to each query, runs it with parallel replicas, returns the result, and replaces the fleet's servers with blank ones.
 
 Scope:
 - 6A: `demo/up`, `demo/down` and `demo/load`.
@@ -267,7 +267,7 @@ Scope:
 - 6D: `demo/README.md`.
 
 Completion gate:
-`demo/e2e.py` runs a query suite at fleet sizes 1, 2 and 4, each answer matching the writer's, while the writer keeps inserting; after each query no fleet process remains and every slot is free.
+`demo/e2e.py` runs a query suite at fleet sizes 1, 2 and 4, each answer matching the writer's, while the writer keeps inserting; after each query its servers stop and every slot holds a blank server again.
 
 Testing plan:
 - `demo/e2e.py` locally and in CI.
@@ -277,9 +277,9 @@ Status ledger:
 | Status | Type | Item | Evidence / Gap |
 | --- | --- | --- | --- |
 | Complete | Work | 6A: `demo/up`, `demo/down`, dataset | `demo/up` starts s3proxy, InodeDB and the writer and writes `.dev/demo/config.json`; `demo/load` fills `demo.events` (20 million rows by default). |
-| Complete | Work | 6B: Slots and fleet configs | `bighouse/fleet.py`: slot `i` uses ports 20000+i, 21000+i and 22000+i. |
-| Complete | Work | 6C: Query API | `bighouse/api.py`: `POST /query?replicas=N` takes slots (503 when none are free), mints a read key, starts the fleet, attaches the writer's tables, runs the query with `enable_parallel_replicas`, stops the fleet, frees the slots, and reports timings in `X-BigHouse-Timings`. |
+| Complete | Work | 6B: Slots and fleet configs | `bighouse/fleet.py`: slot `i` uses ports 20000+i, 21000+i and 22000+i and runs one server at a time; `Fleet.tenant_config_xml` names exactly the fleet's servers as the cluster `bighouse`. |
+| Complete | Work | 6C: Query API | `bighouse/api.py`: `POST /query?replicas=N` takes blank servers from the pool (503 when too few slots are free, a wait when their servers are still booting), mints a read key, assigns the servers, attaches the writer's tables, runs the query with `enable_parallel_replicas`, returns the answer, and has the pool replace the servers. `X-BigHouse-Timings` reports the wait, assignment, attach, query and total. |
 | Complete | Decision | Query API language | Python with the standard library only. |
 | Complete | Doc | 6D: Walkthrough | `demo/README.md`: starting the writer, loading data, the query API, a query and its headers, what happens per query, `demo/e2e.py`, and stopping. |
 | Complete | Test | Concurrent queries | `demo/e2e.py`: two queries at once take separate slots and both answer. |
-| In Progress | Gate | `demo/e2e.py` matches the writer at 1, 2 and 4 servers | Locally every check passes: a query takes 300 to 420 ms (start 170 to 280 ms, attach 30 to 40 ms, query 30 to 70 ms), and each server of a fleet of 4 reads a share of the marks (1175, 329, 576 and 365). Missing: a CI run. |
+| In Progress | Gate | `demo/e2e.py` matches the writer at 1, 2 and 4 servers | Locally 27 of 27 checks pass, at 1, 2, 4 and 8 servers on the warm pool (5H), and each server of a fleet of 4 reads a share of the marks (727, 566, 576 and 576). Missing: a CI run. |
