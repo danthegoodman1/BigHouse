@@ -1,0 +1,4 @@
+[submodule "ClickHouse"]
+	path = ClickHouse
+	url = https://github.com/ClickHouse/ClickHouse.git
+	shallow = true
