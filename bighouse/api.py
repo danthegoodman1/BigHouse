@@ -30,6 +30,10 @@ from urllib.parse import parse_qs, urlparse
 from bighouse import fleet, stack
 
 CONFIG = stack.DEV / "demo/config.json"
+# Each query's read key expires after this, so a key the API never revokes, because it died first, stops working on
+# its own. The servers need the key until they stop, to read and to release their leases, so queries stop sooner.
+KEY_TTL_MINUTES = 15
+MAX_QUERY_SECONDS = (KEY_TTL_MINUTES - 1) * 60
 
 
 class Busy(RuntimeError):
@@ -64,8 +68,8 @@ class QueryApi:
         waited = (time.monotonic() - started) * 1000
         key = ""
         try:
-            # A read key rooted at the disk: it can't write, and it lapses on its own if this process dies.
-            key = stack.mint_key(self.config["inodedb_root"], "read", ttl="15m")
+            # A read key rooted at the disk: it can't write.
+            key = stack.mint_key(self.config["inodedb_root"], "read", ttl=f"{KEY_TTL_MINUTES}m")
             summoned = fleet.Fleet(servers, s3_prefix=self.config["s3_prefix"], key=key)
             summoned.timings["wait_ms"] = waited
             summoned.assign()
@@ -79,7 +83,7 @@ class QueryApi:
         started = time.monotonic()
         with self.summon(replicas) as summoned:
             try:
-                result = summoned.query(sql)
+                result = summoned.query(sql, settings={"max_execution_time": MAX_QUERY_SECONDS})
             except stack.QueryError as error:
                 if not summoned.left_out:
                     raise
