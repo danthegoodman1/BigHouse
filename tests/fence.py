@@ -2,7 +2,8 @@
 """Two writers on one `inodedb` disk: the second takes ownership at startup, and the first can no longer write.
 
 - The first writer's next insert fails with `TABLE_IS_READ_ONLY` and applies nothing.
-- The second writer attaches the table, reads every row the first committed, and inserts.
+- The second writer loads the first's database from InodeDB at startup, reads every row the first committed, and
+  inserts.
 - A read key cannot write to InodeDB.
 
     python3 tests/fence.py
@@ -33,7 +34,7 @@ def writer(name: str, port: int, prefix: str, key: str) -> stack.Server:
         name=name, tcp_port=port, http_port=port - 1000, interserver_port=port + 9,
         disks=[stack.inodedb_disk_xml(fleet.DISK, s3_prefix=prefix, key=key)],
         policies=[stack.policy_xml(fleet.DISK, fleet.DISK)],
-        extra_config=fleet.default_policy_xml(),
+        extra_config=fleet.writer_config_xml(),
     )
 
 
@@ -48,7 +49,6 @@ def main() -> int:
         first.query("CREATE DATABASE f")
         first.query("CREATE TABLE f.t (k UInt64) ENGINE = MergeTree ORDER BY k")
         first.query("INSERT INTO f.t SELECT number FROM numbers(1000)")
-        ddls = fleet.table_ddls(first)
 
         second.start()
         try:
@@ -58,9 +58,6 @@ def main() -> int:
             check("TABLE_IS_READ_ONLY" in str(error) and "lost ownership" in str(error),
                   "the first writer's insert fails once the second owns the disk", str(error)[:300])
 
-        second.query("CREATE DATABASE f")
-        for _, ddl in ddls:
-            second.query(ddl)
         check(second.value("SELECT count(), max(k) FROM f.t") == "1000\t999", "the second writer reads only what the first committed",
               second.value("SELECT count(), max(k) FROM f.t"))
         second.query("INSERT INTO f.t SELECT number FROM numbers(2000, 10)")

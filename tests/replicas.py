@@ -18,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from bighouse import fleet, stack  # noqa: E402
+from bighouse import catalog, fleet, stack  # noqa: E402
 
 failures = 0
 
@@ -47,13 +47,16 @@ def main() -> int:
         name=f"replicas-{run}-writer", tcp_port=19500, http_port=18600, interserver_port=19509,
         disks=[stack.inodedb_disk_xml(fleet.DISK, s3_prefix=prefix, key=stack.mint_key(root, "write"))],
         policies=[stack.policy_xml(fleet.DISK, fleet.DISK)],
-        extra_config="<merge_tree><storage_policy>bighouse</storage_policy><old_parts_lifetime>1</old_parts_lifetime><merge_tree_clear_old_parts_interval_seconds>1</merge_tree_clear_old_parts_interval_seconds><cleanup_delay_period>1</cleanup_delay_period><cleanup_delay_period_random_add>0</cleanup_delay_period_random_add><max_cleanup_delay_period>1</max_cleanup_delay_period></merge_tree>",
+        extra_config="<merge_tree><storage_policy>bighouse</storage_policy><old_parts_lifetime>1</old_parts_lifetime><merge_tree_clear_old_parts_interval_seconds>1</merge_tree_clear_old_parts_interval_seconds><cleanup_delay_period>1</cleanup_delay_period><cleanup_delay_period_random_add>0</cleanup_delay_period_random_add><max_cleanup_delay_period>1</max_cleanup_delay_period></merge_tree>"
+                     + fleet.database_disk_xml(),
     )
+    replica_key = stack.mint_key(root, "read")
     replica = stack.Server(
         name=f"replicas-{run}-replica", tcp_port=19510, http_port=18610, interserver_port=19519,
-        disks=[fleet.replica_disk_xml(s3_prefix=prefix, key=stack.mint_key(root, "read"))],
+        disks=[fleet.replica_disk_xml(s3_prefix=prefix, key=replica_key)],
         policies=[stack.policy_xml(fleet.DISK, fleet.DISK)],
-        extra_config=fleet.default_policy_xml(),
+        # Every table the replica attaches refreshes its parts each second.
+        extra_config=f"<merge_tree><storage_policy>{fleet.DISK}</storage_policy><refresh_parts_interval>1</refresh_parts_interval></merge_tree>",
     )
     writer.start()
     replica.start()
@@ -64,11 +67,9 @@ def main() -> int:
                      "ENGINE = MergeTree PARTITION BY p ORDER BY k")
         writer.query("INSERT INTO r.t (p, k) SELECT number % 3, number FROM numbers(3000)")
 
-        replica.query("CREATE DATABASE r")
-        for _, ddl in fleet.table_ddls(writer):
-            replica.query(ddl.replace("SETTINGS ", "SETTINGS refresh_parts_interval = 1, ", 1))
+        catalog.attach(replica, replica_key)
         count = lambda: replica.value("SELECT count() FROM r.t")  # noqa: E731
-        check(count() == "3000", "the replica attaches the writer's table")
+        check(count() == "3000", "the replica attaches the writer's database from InodeDB")
 
         writer.query("INSERT INTO r.t (p, k) SELECT 3, number FROM numbers(500)")
         ok, got = eventually(count, "3500")

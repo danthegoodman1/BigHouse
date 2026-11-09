@@ -3,12 +3,14 @@
     POST /query?replicas=N    the body is the SQL; the answer is ClickHouse's output
 
 The response's `X-BigHouse-Timings` header holds the fleet's start, attach, query and stop times in milliseconds,
-and `X-BigHouse-Replicas` the fleet size. A host runs as many fleet servers at once as it has slots; a query that
-finds too few free gets 503.
+and `X-BigHouse-Replicas` the fleet size. `X-BigHouse-Left-Out` maps each of the writer's databases the fleet could
+not serve to the reason; a failed query's error names them too. A host runs as many fleet servers at once as it
+has slots; a query that finds too few free gets 503.
 
     python3 -m bighouse.api [--port 8080] [--slots 16]
 
-It reads the writer's address and the disk's location from `.dev/demo/config.json`, which `demo/up` writes.
+It reads the disk's location in InodeDB and S3 from `.dev/demo/config.json`, which `demo/up` writes. Fleets read the
+writer's databases from InodeDB, so queries need nothing from the writer and keep working while it is down.
 """
 
 from __future__ import annotations
@@ -33,10 +35,10 @@ class Busy(RuntimeError):
 class QueryApi:
     def __init__(self, config: dict, slots: int):
         self.config = config
-        self.writer = stack.Server(name="writer", tcp_port=config["writer_tcp_port"], http_port=config["writer_http_port"], interserver_port=0)
         self.pool = fleet.SlotPool(slots)
 
-    def run(self, sql: str, replicas: int) -> tuple[str, dict[str, float]]:
+    def run(self, sql: str, replicas: int) -> tuple[str, dict[str, float], dict[str, str]]:
+        """The query's answer, the fleet's timings, and why the fleet left out each database it could not serve."""
         slots = self.pool.acquire(replicas)
         if slots is None:
             raise Busy(f"fewer than {replicas} free slots")
@@ -45,14 +47,20 @@ class QueryApi:
         key = stack.mint_key(self.config["inodedb_root"], "read", ttl="15m")
         summoned = fleet.Fleet(slots, s3_prefix=self.config["s3_prefix"], key=key)
         try:
-            summoned.start(fleet.table_ddls(self.writer))
-            result = summoned.query(sql)
+            summoned.start()
+            try:
+                result = summoned.query(sql)
+            except stack.QueryError as error:
+                if not summoned.left_out:
+                    raise
+                left_out = "; ".join(f"{name}: {why}" for name, why in summoned.left_out.items())
+                raise stack.QueryError(f"{error}\nThe fleet left out these databases: {left_out}") from None
         finally:
             summoned.stop()
             self.pool.release(slots)
             stack.idb("key", "revoke", key)
         summoned.timings["total_ms"] = (time.monotonic() - started) * 1000
-        return result, summoned.timings
+        return result, summoned.timings, summoned.left_out
 
 
 def make_handler(api: QueryApi):
@@ -69,16 +77,19 @@ def make_handler(api: QueryApi):
                 return self._reply(400, b"replicas must be a positive integer\n")
             sql = self.rfile.read(int(self.headers.get("Content-Length", 0))).decode()
             try:
-                result, timings = api.run(sql, replicas)
+                result, timings, left_out = api.run(sql, replicas)
             except Busy as error:
                 return self._reply(503, f"{error}\n".encode())
             except Exception as error:  # noqa: BLE001
                 traceback.print_exc()
                 return self._reply(500, f"{error}\n".encode())
-            self._reply(200, result.encode(), {
+            headers = {
                 "X-BigHouse-Replicas": str(replicas),
                 "X-BigHouse-Timings": json.dumps({k: round(v, 1) for k, v in timings.items()}),
-            })
+            }
+            if left_out:
+                headers["X-BigHouse-Left-Out"] = json.dumps(left_out)
+            self._reply(200, result.encode(), headers)
 
         def _reply(self, status: int, body: bytes, headers: dict[str, str] | None = None) -> None:
             self.send_response(status)

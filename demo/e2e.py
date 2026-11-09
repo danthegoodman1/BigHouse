@@ -6,7 +6,8 @@
    whole batches only: n batches give n * 1000 rows whose `batch` values sum to 1000 * (0 + ... + n-1).
 3. Every server of a fleet reads a share of the query.
 4. Two queries at once take separate slots and both answer.
-5. No fleet server outlives its query.
+5. A fleet answers while the writer is down.
+6. No fleet server outlives its query.
 
     demo/e2e.py [rows]        rows demo.events needs, 20 million by default: enough parts that every server of a
                               fleet of 4 gets a share
@@ -24,7 +25,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer
 
-from common import CONFIG, up
+from common import CONFIG, down, up
 
 from bighouse import api, fleet, stack
 
@@ -109,7 +110,7 @@ def main() -> int:
         key = stack.mint_key(query_api.config["inodedb_root"], "read", ttl="15m")
         summoned = fleet.Fleet(slots, s3_prefix=query_api.config["s3_prefix"], key=key)
         try:
-            summoned.start(fleet.table_ddls(writer))
+            summoned.start()
             got = summoned.query(SPREAD)
             shares = summoned.marks_read()
         finally:
@@ -123,6 +124,15 @@ def main() -> int:
         with ThreadPoolExecutor(2) as pool:
             answers = list(pool.map(lambda _: ask(SUITE[0], 2)[0], range(2)))
         check(answers == [expected[0]] * 2, "two queries at once both answer")
+
+        stop.set()
+        ingester.join()
+        down()
+        try:
+            got, _ = ask(SUITE[0], 2)
+            check(got == expected[0], "a fleet answers while the writer is down", f"got {got!r}")
+        finally:
+            up()
     finally:
         stop.set()
         ingester.join()

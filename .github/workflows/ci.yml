@@ -80,6 +80,9 @@ jobs:
       - name: Replicas
         run: python3 tests/replicas.py
 
+      - name: Discovery
+        run: python3 tests/discovery.py
+
       - name: Crash
         run: python3 tests/crash.py 20
 

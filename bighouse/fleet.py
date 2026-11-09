@@ -1,22 +1,22 @@
 """Fleets: ClickHouse servers summoned for one query, reading the writer's tables as parallel replicas.
 
 Every fleet server runs in a slot, a fixed set of ports known ahead, and gets a read-only InodeDB disk with the
-writer's disk and policy names. Tables attach from the writer's DDL with their UUIDs, so each resolves to the
-writer's directory in InodeDB. One server coordinates the query and the rest read their share of its marks.
+writer's disk and policy names. It attaches the writer's databases from their definitions in InodeDB
+(`bighouse.catalog`), so each table resolves to the writer's directory there. One server coordinates the query and
+the rest read their share of its marks.
 """
 
 from __future__ import annotations
 
-import re
 import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-from bighouse import stack
+from bighouse import catalog, stack
 
-DISK = "bighouse"
+DISK = catalog.DISK
 CLUSTER = "bighouse"
 
 
@@ -71,27 +71,19 @@ def default_policy_xml() -> str:
     return f"<merge_tree><storage_policy>{DISK}</storage_policy></merge_tree>"
 
 
-def table_ddls(writer: stack.Server) -> list[tuple[str, str]]:
-    """`(database, ATTACH TABLE ...)` for every MergeTree table on the writer, with its UUID."""
-    rows = writer.query(
-        "SELECT database, name FROM system.tables "
-        "WHERE engine LIKE '%MergeTree' AND database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA') "
-        "FORMAT TSV"
-    ).splitlines()
-    ddls = []
-    for row in rows:
-        database, name = row.split("\t")
-        create = writer.query(
-            f"SHOW CREATE TABLE `{database}`.`{name}` FORMAT TSVRaw",
-            settings={"show_table_uuid_in_table_create_query_if_not_nil": 1},
-        ).strip()
-        ddls.append((database, re.sub(r"^CREATE TABLE", "ATTACH TABLE", create, count=1)))
-    return ddls
+def database_disk_xml() -> str:
+    """Keeps a writer's database definitions on the disk, where fleets find them."""
+    return f"<database_disk><disk>{DISK}</disk></database_disk>"
+
+
+def writer_config_xml() -> str:
+    return default_policy_xml() + database_disk_xml()
 
 
 class Fleet:
     def __init__(self, slots: list[Slot], *, s3_prefix: str, key: str):
         self.id = uuid.uuid4().hex[:8]
+        self.key = key
         replicas = "".join(f"<replica><host>127.0.0.1</host><port>{slot.tcp_port}</port></replica>" for slot in slots)
         cluster = f"<remote_servers><{CLUSTER}><shard>{replicas}</shard></{CLUSTER}></remote_servers>"
         self.servers = [
@@ -107,27 +99,31 @@ class Fleet:
             for slot in slots
         ]
         self.timings: dict[str, float] = {}
+        # Each of the writer's databases the fleet left out, with the reason.
+        self.left_out: dict[str, str] = {}
 
-    def _each(self, fn) -> None:
-        with ThreadPoolExecutor(len(self.servers)) as pool:
-            for future in [pool.submit(fn, server) for server in self.servers]:
+    def _each(self, fn, servers: list[stack.Server] | None = None) -> None:
+        servers = self.servers if servers is None else servers
+        if not servers:
+            return
+        with ThreadPoolExecutor(len(servers)) as pool:
+            for future in [pool.submit(fn, server) for server in servers]:
                 future.result()
 
-    def start(self, ddls: list[tuple[str, str]]) -> None:
+    def start(self) -> None:
         started = time.monotonic()
         self._each(lambda server: server.start())
         self.timings["start_ms"] = (time.monotonic() - started) * 1000
 
+        # The coordinator settles which databases the fleet serves; the others attach the same ones.
         started = time.monotonic()
-        databases = sorted({database for database, _ in ddls})
+        databases, self.left_out = catalog.attach(self.servers[0], self.key)
 
         def attach(server: stack.Server) -> None:
             for database in databases:
-                server.query(f"CREATE DATABASE IF NOT EXISTS `{database}`")
-            for _, ddl in ddls:
-                server.query(ddl)
+                database.attach(server)
 
-        self._each(attach)
+        self._each(attach, self.servers[1:])
         self.timings["attach_ms"] = (time.monotonic() - started) * 1000
 
     def query(self, sql: str, settings: dict[str, object] | None = None) -> str:

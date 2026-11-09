@@ -16,8 +16,8 @@ Each table has one writer. The demo runs on one machine with s3proxy standing in
 | `ClickHouse/src/Disks/DiskObjectStorage/MetadataStorages/InodeDB/` | The `inodedb` metadata type: gRPC client, value format, cache, storage and transaction. |
 | `inodedb/` | Submodule: InodeDB at the revision the client's `proto/inodedb.proto` copies. |
 | `scripts/` | `clickhouse-build`, `inodedb-build`, `dev-up`, `dev-down`. |
-| `bighouse/` | `stack.py` (keys, disk configs, servers), `fleet.py` (slots and fleets), `api.py` (the query API). |
-| `tests/` | `features.py`, `crash.py`, `claims.py`, `fence.py`, `replicas.py`, `parity.py`, `bench.py`. |
+| `bighouse/` | `stack.py` (keys, disk configs, servers), `catalog.py` (the writer's databases in InodeDB), `fleet.py` (slots and fleets), `api.py` (the query API). |
+| `tests/` | `features.py`, `crash.py`, `claims.py`, `fence.py`, `replicas.py`, `discovery.py`, `parity.py`, `bench.py`. |
 | `demo/` | `up`, `down`, `load`, `e2e.py`. |
 
 ## Implementation Principles
@@ -45,7 +45,7 @@ Each table has one writer. The demo runs on one machine with s3proxy standing in
 | `src/Storages/MergeTree/DataPartStorageOnDiskBase.cpp` | `rename` sets the directory's modification time and moves it in one disk transaction when the part has none open. | One InodeDB commit per rename, not two. |
 | `src/Backups/BackupEntryWithChecksumCalculation.cpp` | A non-empty file without blobs takes its checksum from its bytes. | Backups of inline files. |
 | `src/Common/ProfileEvents.cpp` | `InodeDB*` events. | Call counts in `system.events`. |
-| `src/Disks/tests/gtest_metadata_local_disk.cpp` | Runs every case against `local` and `inodedb`, plus `inodedb`-only inline and spill cases. | Unit parity. |
+| `src/Disks/tests/gtest_metadata_local_disk.cpp` | Runs every case against `local` and `inodedb`, plus `inodedb`-only inline, spill and replica cases. | Unit parity. |
 | `src/Disks/tests/gtest_inodedb_client.cpp` | The client's standby redirect and retried commit, through a fault-injecting proxy. | Client behavior on failover and lost answers. |
 
 ## Testing Strategy
@@ -229,14 +229,15 @@ Scope:
 - 5B: One snapshot per fleet.
 - 5C: Dropped parts on refresh.
 - 5D: Reader leases.
-- 5E: Table discovery for long-lived replicas.
+- 5E: Table discovery from InodeDB.
 - 5F: Scoped keys.
+- 5G: Schema changes reach long-lived replicas.
 
 Completion gate:
 A replica sees a new part and a dropped partition within a few refreshes, a long query on a replica returns the right answer while the writer merges and deletes its inputs, and an `ALTER` on the writer reaches the replica.
 
 Testing plan:
-- `tests/replicas.py`.
+- `tests/replicas.py`, `tests/discovery.py`.
 
 Status ledger:
 
@@ -246,9 +247,11 @@ Status ledger:
 | Complete | Decision | 5B: One snapshot per fleet | Parallel replicas read the parts the coordinator's first announcing replica lists (`DefaultCoordinator::initializeReadingState`), so a fleet reads one state without pinning an InodeDB version. `demo/e2e.py` checks whole batches mid-ingest at 1, 2 and 4 servers. |
 | Complete | Work | 5C: Dropped parts on refresh | `MergeTreeData::refreshDataPartsOnce` (ClickHouse files changes table). `tests/replicas.py`: new part, dropped partition and truncation each reach the replica. |
 | Complete | Work | 5D: Reader leases | `InodeDBReaderLease` beats every 10 s, releases versions it read more than `inodedb_lease_lag_ms` ago, and releases the lease when the disk shuts down, cancelling its stream only after an attempt's deadline. `tests/replicas.py`: a slow replica query reads parts the writer merged away and deleted; no blob goes while the lease holds it, and the writer deletes them 0.2 s after the replica stops, within the test's 20 s bound and well inside the 30 s lease TTL. |
-| Incomplete | Work | 5E: Table discovery | Fleets attach tables from the writer's `SHOW CREATE TABLE` per query (`fleet.table_ddls`). Missing: schema propagation for long-lived replicas, through `database_disk` on the `inodedb` disk, and an `ALTER` test. |
+| Complete | Work | 5E: Table discovery from InodeDB | Writers keep database definitions on the disk (`fleet.writer_config_xml`: `database_disk`). `bighouse/catalog.py` reads each database's UUID from `metadata/<name>.sql` in InodeDB under the fleet's read key, and the coordinator attaches each with `ATTACH DATABASE ... SETTINGS disk = 'bighouse'`, then detaches any database holding a table off the disk, a refreshable materialized view or another engine; the other servers attach the rest. A read-only `inodedb` disk commits a transaction that only creates existing directories, as attaching runs `createDirectories` (gtest `TestReplicaCreatesExistingDirectories`). `tests/discovery.py`: 20 of 20 checks, covering tables, views, materialized views and `default`, four kinds of left-out database with reasons, `ALTER ADD/DROP COLUMN`, table and database `CREATE`, `DROP` and `RENAME`, and a query with the writer down. `demo/e2e.py`: all checks, attach 22 to 45 ms, and a query with the writer down. |
+| Incomplete | Work | 5G: Schema changes reach long-lived replicas | A long-lived replica keeps the schema it attached with; each new fleet reads the current one (5E). Missing: reattaching on InodeDB `Watch` events under `metadata/` and `store/`, and an `ALTER` test against a running replica. |
+| Incomplete | Risk | Killed fleet servers hold blob deletion | `Fleet.stop` kills its servers, so each lease lasts until its 30 s TTL, and InodeDB's release horizon spans every lease: `tests/replicas.py` run right after `tests/discovery.py` saw the merged-away blobs go 13.2 s after its replica stopped, against 0.4 s alone. Missing: fleets that release their leases as they stop. |
 | Complete | Work | 5F: Scoped read keys | `bighouse/api.py` mints a read key rooted at the writer's directory with a 15-minute TTL per query and revokes it after. `tests/fence.py`: a read key cannot write. |
-| In Progress | Gate | Replicas track the writer and keep their queries | `tests/replicas.py`: 10 of 10 checks pass. Missing: 5E. |
+| In Progress | Gate | Replicas track the writer and keep their queries | `tests/replicas.py`: 10 of 10 checks pass, attaching the writer's database from InodeDB. `tests/discovery.py`: each new fleet sees the writer's `ALTER`. Missing: 5G, for a running replica. |
 
 ## Phase 6: The BigHouse Query API
 

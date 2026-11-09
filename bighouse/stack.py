@@ -37,14 +37,18 @@ def admin_key() -> str:
     return INODEDB_ADMIN_KEY.read_text().strip()
 
 
-def idb(*args: str, key: str | None = None) -> str:
+def idb_bytes(*args: str, key: str | None = None) -> bytes:
+    """What `idb` prints, under `key` or the admin key."""
     result = subprocess.run(
         [str(IDB), "--endpoint", f"http://{INODEDB_ENDPOINT}", "--key", key or admin_key(), *args],
         check=True,
         capture_output=True,
-        text=True,
     )
     return result.stdout
+
+
+def idb(*args: str, key: str | None = None) -> str:
+    return idb_bytes(*args, key=key).decode()
 
 
 def mint_key(root: str, grant: str, ttl: str | None = None) -> str:

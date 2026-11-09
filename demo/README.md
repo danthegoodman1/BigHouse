@@ -26,7 +26,7 @@ You need Docker for s3proxy and Python 3.11 or later; the scripts use only the s
 demo/up
 ```
 
-`demo/up` runs `scripts/dev-up`, which starts s3proxy on `127.0.0.1:11111` and InodeDB on `127.0.0.1:7070`. Then it mints an InodeDB write key rooted at `bighouse/demo` and starts the writer, whose `bighouse` disk keeps blobs in s3proxy under `bighouse/demo/` and metadata in InodeDB under the key's root. The writer answers on `http://127.0.0.1:18200` and native port 19100, and its default storage policy is the `bighouse` disk, so every `MergeTree` table lands there.
+`demo/up` runs `scripts/dev-up`, which starts s3proxy on `127.0.0.1:11111` and InodeDB on `127.0.0.1:7070`. Then it mints an InodeDB write key rooted at `bighouse/demo` and starts the writer, whose `bighouse` disk keeps blobs in s3proxy under `bighouse/demo/` and metadata in InodeDB under the key's root. The writer answers on `http://127.0.0.1:18200` and native port 19100. Its default storage policy is the `bighouse` disk, so every `MergeTree` table lands there, and its `database_disk` is the same disk, so every database's definition lands there too.
 
 ## 2. Load data
 
@@ -58,7 +58,8 @@ curl -s -D - 'http://127.0.0.1:8080/query?replicas=4' \
 The answer matches the writer's. Two headers describe the fleet:
 
 - `X-BigHouse-Replicas`: the fleet size.
-- `X-BigHouse-Timings`: milliseconds to start the servers, attach the tables, run the query, and stop the fleet.
+- `X-BigHouse-Timings`: milliseconds to start the servers, attach the databases, run the query, and stop the fleet.
+- `X-BigHouse-Left-Out`: each of the writer's databases the fleet could not serve, with the reason. Present only when there is one.
 
 A query that finds too few free slots gets `503`.
 
@@ -66,7 +67,7 @@ A query that finds too few free slots gets `503`.
 
 1. The API takes `replicas` free slots and mints an InodeDB read key rooted at `bighouse/demo`, valid for 15 minutes.
 2. It starts one ClickHouse server per slot. Each gets a read-only `bighouse` disk with the read key and a cluster `bighouse` naming exactly the fleet's slots.
-3. It reads `SHOW CREATE TABLE` from the writer for every `MergeTree` table and attaches each on every fleet server with its UUID, so each table resolves to the writer's directory in InodeDB.
+3. It lists the writer's databases in InodeDB, reading each one's UUID from `metadata/<name>.sql`, and the first server attaches each with `ATTACH DATABASE ... SETTINGS disk = 'bighouse'`, which loads every table from its definition in InodeDB. The first server then leaves out any database holding something a fleet cannot serve as the writer would: a table whose data lies off the `bighouse` disk, a materialized view that refreshes on a schedule, or another engine. The other servers attach the databases it kept. The writer plays no part, so queries work while it is down.
 4. It runs the query on the first server with `enable_parallel_replicas = 1`, `max_parallel_replicas` set to the fleet size, `cluster_for_parallel_replicas = 'bighouse'` and `parallel_replicas_for_non_replicated_merge_tree = 1`. That server coordinates, and every server reads a share of the marks from one snapshot of the parts.
 5. It kills the fleet, deletes the servers' directories, frees the slots and revokes the key.
 
@@ -84,6 +85,7 @@ python3 demo/e2e.py
 - fleets see whole insert batches only, while the writer inserts and merges;
 - every server of a fleet of 4 reads a share of the query;
 - two queries at once take separate slots and both answer;
+- a fleet answers while the writer is down;
 - no fleet server or directory outlives its query.
 
 ## Stop
