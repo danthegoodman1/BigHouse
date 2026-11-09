@@ -44,7 +44,9 @@ CLICKHOUSE_SRC = stack.ROOT / "ClickHouse"
 BINARY = stack.DEV / "parity/clickhouse"
 # A regression fails this many `inodedb` rechecks in a row.
 RECHECKS = 3
-RESULT = re.compile(r"^(?:\[\s*\d+\s*/\s*\d+\]\s+)?(\S+?):\s.*\[ (OK|FAIL|SKIPPED|UNKNOWN|BROKEN|SERVER_DIED) \]")
+# A test's result, such as `[ 12 / 17446] 01345_index_date_vs_datetime:   [ OK ] 0.27 sec.`. It can follow output a
+# test left without a newline, so it matches anywhere in a line.
+RESULT = re.compile(r"\[\s*\d+\s*/\s*\d+\]\s+(\S+?):\s+\[ (OK|FAIL|SKIPPED|UNKNOWN|BROKEN|SERVER_DIED) \]")
 
 
 def tools(base: Path) -> tuple[Path, dict[str, str]]:
@@ -215,7 +217,7 @@ def run_tests(base: Path, jobs: int, timeout: int, patterns: list[str], queries:
         process = subprocess.Popen(command, cwd=CLICKHOUSE_SRC / "tests", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
         for line in process.stdout:
             log.write(line)
-            if match := RESULT.match(line):
+            for match in RESULT.finditer(line):
                 results[match.group(1)] = match.group(2)
         process.wait()
     (base / "results.json").write_text(json.dumps(results, indent=1, sort_keys=True))
