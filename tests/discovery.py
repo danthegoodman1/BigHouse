@@ -3,7 +3,8 @@
 
 - A fleet serves the writer's tables, views, materialized views and `default` database, on every server.
 - It leaves out each database it cannot serve as the writer would, says why, and names them when a query fails:
-  a `Memory` table, a table on a local disk, a storage policy the fleet lacks, a refreshable materialized view.
+  a `Memory` table, a table on a local disk, a storage policy the fleet lacks, a refreshable materialized view. A
+  fleet that leaves out the writer's `default` keeps an empty one of its own.
 - The next fleet sees the writer's `ALTER`, `CREATE`, `DROP` and `RENAME` of tables and databases.
 - A fleet answers while the writer is down.
 
@@ -123,6 +124,11 @@ def main() -> int:
         same("SELECT count() FROM e.t", "the next fleet reads a new database")
         left_out = query_api.run("SELECT 1", replicas=1)[2]
         check(sorted(left_out) == ["elsewhere", "mem2", "sched"], "the next fleet sees dropped and renamed databases", str(left_out))
+
+        writer.query("CREATE TABLE default.mm (k UInt64) ENGINE = Memory")
+        got, _, left_out = query_api.run("SELECT count() FROM d.t", replicas=2)
+        check("default" in left_out and got == writer.query("SELECT count() FROM d.t"),
+              "a fleet that leaves out the writer's `default` keeps an empty one and answers", f"{got!r}, {left_out}")
 
         want = writer.query("SELECT count(), sum(k), sum(c) FROM d.t")
         writer.stop()

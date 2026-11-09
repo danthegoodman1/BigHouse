@@ -82,7 +82,8 @@ class Database:
                      settings={"database": "system"})
 
     def detach(self, server: stack.Server) -> None:
-        server.query(f"DETACH DATABASE {quote(self.name)}", settings={"database": "system"})
+        # Dropping a database attached from the read-only disk removes only the server's own record of it.
+        server.query(f"DROP DATABASE {quote(self.name)} SYNC", settings={"database": "system"})
         if self.name == "default":
             server.query("CREATE DATABASE default", settings={"database": "system"})
 
