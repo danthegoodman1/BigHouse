@@ -12,7 +12,7 @@ Each table has one writer. The demo runs on one machine with s3proxy standing in
 
 | Path | Contents |
 | --- | --- |
-| `ClickHouse/` | Submodule: ClickHouse `v26.10.2.103-stable`, shallow. BigHouse's ClickHouse changes go on a `bighouse` branch. |
+| `ClickHouse/` | Submodule: branch `bighouse` of `danthegoodman1/ClickHouse`, cut from ClickHouse `v26.10.2.103-stable`, shallow. `ClickHouse/LICENSE-BIGHOUSE` reserves all rights to BigHouse's code there. |
 | `Custom Metadata for Object-Storage Disks.md` | The design. |
 | `PLAN.md` | This plan. |
 
@@ -22,6 +22,7 @@ Later phases add `inodedb/` (pinned InodeDB), `scripts/`, `tests/` and `demo/`.
 
 - **Parity with `local` is the bar.** Implement every method `MetadataStorageFromDisk` and its transaction implement (`ClickHouse/src/Disks/DiskObjectStorage/MetadataStorages/Local/MetadataStorageFromDisk.h`), with the same capability flags: `supportsEmptyFilesWithoutBlobs`, `areBlobPathsRandom`, `supportWritingWithAppend`, `supportsChmod` and `supportsStat`. A differential run against `local` decides parity, and a test that fails only on `inodedb` is a bug.
 - **Keep ClickHouse changes contained.** New code lives in `ClickHouse/src/Disks/DiskObjectStorage/MetadataStorages/InodeDB/`. Every change outside that directory gets a ledger row naming the file and the reason, so rebasing onto a new ClickHouse release stays small.
+- **BigHouse's code stays unlicensed.** `ClickHouse/LICENSE-BIGHOUSE` grants no license for BigHouse's directories in the fork or for its changes to ClickHouse files, and Apache 2.0 covers ClickHouse's own code. A new BigHouse directory gets added to that file's list, and each modified ClickHouse file gets a short notice at the change, as Apache 2.0 §4(b) requires.
 - **InodeDB owns tree semantics.** The disk maps ClickHouse files onto inodes and values. When InodeDB lacks a capability, build it in `../inodedb` under that project's plan and tests.
 - **One fenced batch per transaction.** Each metadata transaction commits as one `all_or_nothing` InodeDB batch carrying the writer's owner fence. Correctness lands first; staging, caching and inline files follow the parity gate.
 - **Blobs outlive every reader.** A blob leaves S3 only after the commit that frees it, and only once no reader lease can reach it.
@@ -65,10 +66,10 @@ Status ledger:
 
 | Status | Type | Item | Evidence / Gap |
 | --- | --- | --- | --- |
-| In Progress | Work | 0A: `rebuild` branch with the old project removed | Branch `rebuild` from `f89c479`; every tracked file staged for deletion. Needs: commit. |
-| In Progress | Work | 0B: ClickHouse submodule at `v26.10.2.103-stable` | `.gitmodules` (`shallow = true`); `git submodule status` reports `c6428ebcc39f`, staged. Needs: commit. |
+| Complete | Work | 0A: `rebuild` branch with the old project removed | `fd4451f` on `origin/rebuild`. |
+| Complete | Work | 0B: ClickHouse submodule from `v26.10.2.103-stable` | `.gitmodules` (`shallow = true`, `branch = bighouse`); the tag is `c6428ebcc39f`. |
 | Incomplete | Doc | Design doc line references | The design doc's line numbers come from an older tree; in the pinned tag `refreshDataPartsOnce` sits at `MergeTreeData.cpp:3535`, not 3206. Needs: references updated to the pinned tag. |
-| Incomplete | Work | 0C: ClickHouse fork with a `bighouse` branch | Needs: approval to create `danthegoodman1/ClickHouse`, then the submodule URL and branch updated. |
+| Complete | Work | 0C: ClickHouse fork with a `bighouse` branch | `danthegoodman1/ClickHouse`, branch `bighouse` at `632ffeccc`, which adds `LICENSE-BIGHOUSE`; the submodule points there. |
 | Incomplete | Work | 0D: InodeDB pinned as a submodule | Missing: `inodedb/` submodule at a commit of `github.com/danthegoodman1/inodedb`. |
 | Incomplete | Work | 0E: `scripts/clickhouse-build` | Missing: script and a build log. |
 | Incomplete | Work | 0F: `scripts/dev-up`, `scripts/dev-down` | Missing: scripts starting s3proxy and InodeDB on fixed ports. |
@@ -85,7 +86,7 @@ ClickHouse code calls InodeDB through a C++ API: batches with conditions, stat, 
 Scope:
 - 1A: Choose the client. The recommendation is a C++ bridge over InodeDB's Rust client, which brings the client's cache, snapshots, leases, request-id retries and writer redirects. Its cost: ClickHouse's Rust workspace (`ClickHouse/rust/workspace`) vendors none of tokio, tonic, h2 or prost today, the build needs `ENABLE_RUST=1`, and `inodedb-proto` needs `protoc` at build time. The fallback is a C++ gRPC client over `contrib/grpc` with a thin cache.
 - 1B: The bridge crate, `ClickHouse/rust/workspace/inodedb/`: one small tokio runtime per process, blocking calls with deadlines, and InodeDB errors mapped to ClickHouse error codes.
-- 1C: Vendored dependencies through `ClickHouse/rust/vendor.sh`, so the build runs offline.
+- 1C: Vendored dependencies through `ClickHouse/rust/vendor.sh`, so the build runs offline. They land in `contrib/rust_vendor`, its own submodule (`ClickHouse/rust_vendor`), which then needs a fork of its own.
 - 1D: `InodeDBClient`, the C++ wrapper the metadata type uses.
 
 Completion gate:
