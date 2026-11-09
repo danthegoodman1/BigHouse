@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Starts the local stack's services, keeping their state in .dev/ (or $BIGHOUSE_DEV_DIR):
+#   s3proxy  127.0.0.1:11111, bucket `test`, credentials clickhouse/clickhouse: the endpoint ClickHouse's
+#            own test configs use;
+#   InodeDB  127.0.0.1:7070, on SQLite, with its admin key in .dev/inodedb/admin.key.
+# `scripts/dev-down` stops both; `scripts/dev-down --wipe` also deletes their state.
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+dev=${BIGHOUSE_DEV_DIR:-$root/.dev}
+inodedb=$root/inodedb/target/release/inodedb
+
+[ -x "$inodedb" ] || "$root/scripts/inodedb-build"
+mkdir -p "$dev/s3/test" "$dev/inodedb"
+
+if ! docker ps --format '{{.Names}}' | grep -qx bighouse-s3proxy; then
+    docker rm -f bighouse-s3proxy > /dev/null 2>&1 || true
+    docker run -d --name bighouse-s3proxy -p 127.0.0.1:11111:80 \
+        -e S3PROXY_ENDPOINT=http://0.0.0.0:80 \
+        -e S3PROXY_AUTHORIZATION=aws-v2-or-v4 \
+        -e S3PROXY_IDENTITY=clickhouse \
+        -e S3PROXY_CREDENTIAL=clickhouse \
+        -e JCLOUDS_PROVIDER=filesystem \
+        -e JCLOUDS_FILESYSTEM_BASEDIR=/data \
+        -v "$dev/s3:/data" \
+        andrewgaul/s3proxy:4.1.1 > /dev/null
+fi
+
+if [ ! -f "$dev/inodedb/pid" ] || ! kill -0 "$(cat "$dev/inodedb/pid")" 2> /dev/null; then
+    cat > "$dev/inodedb/inodedb.toml" <<TOML
+listen = "127.0.0.1:7070"
+shallow_idle = false
+
+[storage]
+backend = "sqlite"
+path = "$dev/inodedb/db.sqlite"
+TOML
+    nohup "$inodedb" --config "$dev/inodedb/inodedb.toml" --init-key "$dev/inodedb/admin.key" \
+        >> "$dev/inodedb/server.log" 2>&1 &
+    echo $! > "$dev/inodedb/pid"
+fi
+
+for _ in $(seq 300); do
+    if [ -s "$dev/inodedb/admin.key" ] && (exec 3<> /dev/tcp/127.0.0.1/7070) 2> /dev/null \
+        && curl -s -o /dev/null http://127.0.0.1:11111/; then
+        echo "s3proxy: http://127.0.0.1:11111/test   InodeDB: 127.0.0.1:7070 (key: $dev/inodedb/admin.key)"
+        exit 0
+    fi
+    sleep 0.1
+done
+echo "the stack did not come up; see $dev/inodedb/server.log and 'docker logs bighouse-s3proxy'" >&2
+exit 1

@@ -3,3 +3,6 @@
 	url = https://github.com/danthegoodman1/ClickHouse.git
 	shallow = true
 	branch = bighouse
+[submodule "inodedb"]
+	path = inodedb
+	url = https://github.com/danthegoodman1/inodedb.git

@@ -1,0 +1,8 @@
+#!/usr/bin/env python3
+"""Starts s3proxy, InodeDB and the demo's writer, which answers on http://127.0.0.1:18200."""
+
+from common import up
+
+server = up()
+print(f"writer: http://127.0.0.1:{server.http_port}  (clickhouse client --port {server.tcp_port})")
+print("next: demo/load, then python3 -m bighouse.api")

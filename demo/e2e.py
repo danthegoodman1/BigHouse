@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""The demo's end-to-end check, through the query API's HTTP interface.
+
+1. Fleets of 1, 2 and 4 servers answer a query suite over `demo.events` exactly as the writer does.
+2. Meanwhile the writer keeps inserting 1,000-row batches into `demo.ingest` and merging them. A fleet must see
+   whole batches only: n batches give n * 1000 rows whose `batch` values sum to 1000 * (0 + ... + n-1).
+3. Every server of a fleet reads a share of the query.
+4. Two queries at once take separate slots and both answer.
+5. No fleet server outlives its query.
+
+    demo/e2e.py [rows]        rows demo.events needs, 20 million by default: enough parts that every server of a
+                              fleet of 4 gets a share
+"""
+
+from __future__ import annotations
+
+import json
+import socket
+import subprocess
+import sys
+import threading
+import time
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from http.server import ThreadingHTTPServer
+
+from common import CONFIG, up
+
+from bighouse import api, fleet, stack
+
+API_PORT = 18080
+SUITE = [
+    "SELECT count(), sum(duration_ms) FROM demo.events",
+    "SELECT kind, count(), avg(duration_ms) FROM demo.events GROUP BY kind ORDER BY kind",
+    "SELECT uniqExact(user_id) FROM demo.events",
+    "SELECT url, count() AS c FROM demo.events GROUP BY url ORDER BY c DESC, url LIMIT 5",
+    "SELECT toStartOfHour(time) AS h, max(duration_ms) FROM demo.events WHERE kind = 'purchase' GROUP BY h ORDER BY h LIMIT 3",
+]
+INGEST_CHECK = "SELECT count(), uniqExact(batch), sum(batch) FROM demo.ingest FORMAT TSV"
+# Enough work per mark that every server of a fleet asks for a share before the marks run out.
+SPREAD = "SELECT count(), sum(duration_ms) FROM demo.events WHERE match(url, '7[0-9]{3}$')"
+
+failures = 0
+
+
+def check(ok: bool, what: str, detail: str = "") -> None:
+    global failures
+    failures += not ok
+    print(f"{'PASS' if ok else 'FAIL'} {what}" + (f": {detail}" if detail and not ok else ""))
+
+
+def ask(sql: str, replicas: int) -> tuple[str, dict]:
+    request = urllib.request.Request(f"http://127.0.0.1:{API_PORT}/query?replicas={replicas}", data=sql.encode(), method="POST")
+    with urllib.request.urlopen(request, timeout=600) as response:
+        return response.read().decode(), json.loads(response.headers["X-BigHouse-Timings"])
+
+
+def ingest(writer: stack.Server, stop: threading.Event) -> None:
+    batch = 0
+    while not stop.is_set():
+        writer.query(f"INSERT INTO demo.ingest SELECT {batch}, number FROM numbers(1000)")
+        batch += 1
+        if batch % 20 == 0:
+            writer.query("OPTIMIZE TABLE demo.ingest")
+
+
+def whole_batches(answer: str) -> bool:
+    count, distinct, total = (int(x) for x in answer.split())
+    return count == 1000 * distinct and total == 1000 * distinct * (distinct - 1) // 2
+
+
+def port_open(port: int) -> bool:
+    with socket.socket() as sock:
+        return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
+def main() -> int:
+    writer = up()
+    rows = int(sys.argv[1]) if len(sys.argv) > 1 else 20_000_000
+    if writer.value("EXISTS TABLE demo.events") != "1" or int(writer.value("SELECT count() FROM demo.events")) != rows:
+        subprocess.run([sys.executable, str(stack.ROOT / "demo/load"), str(rows)], check=True)
+    writer.query("DROP TABLE IF EXISTS demo.ingest SYNC")
+    writer.query("CREATE TABLE demo.ingest (batch UInt64, n UInt64) ENGINE = MergeTree ORDER BY (batch, n)")
+
+    query_api = api.QueryApi(json.loads(CONFIG.read_text()), slots=8)
+    http = ThreadingHTTPServer(("127.0.0.1", API_PORT), api.make_handler(query_api))
+    threading.Thread(target=http.serve_forever, daemon=True).start()
+
+    stop = threading.Event()
+    ingester = threading.Thread(target=ingest, args=(writer, stop))
+    ingester.start()
+    try:
+        expected = [writer.query(sql) for sql in SUITE]
+        for replicas in (1, 2, 4):
+            for sql, want in zip(SUITE, expected):
+                got, timings = ask(sql, replicas)
+                check(got == want, f"{replicas} replicas: {sql[:60]}", f"got {got!r}, want {want!r}")
+            print(f"    last timings at {replicas} replicas: {timings}")
+
+            before = int(writer.value("SELECT count() FROM demo.ingest"))
+            got, _ = ask(INGEST_CHECK, replicas)
+            after = int(writer.value("SELECT count() FROM demo.ingest"))
+            count = int(got.split()[0])
+            check(whole_batches(got) and before <= count <= after, f"{replicas} replicas see whole batches mid-ingest",
+                  f"got {got.strip()}, writer had {before} then {after}")
+
+        # Every server reads a share. The API dismisses its fleets, so run one here.
+        slots = query_api.pool.acquire(4)
+        key = stack.mint_key(query_api.config["inodedb_root"], "read", ttl="15m")
+        summoned = fleet.Fleet(slots, s3_prefix=query_api.config["s3_prefix"], key=key)
+        try:
+            summoned.start(fleet.table_ddls(writer))
+            got = summoned.query(SPREAD)
+            shares = summoned.marks_read()
+        finally:
+            summoned.stop()
+            query_api.pool.release(slots)
+            stack.idb("key", "revoke", key)
+        check(got == writer.query(SPREAD), "a fleet of 4 answers directly")
+        check(all(n > 0 for n in shares), "every server of a fleet of 4 reads a share", f"marks read per server: {shares}")
+        print(f"    marks read per server: {shares}")
+
+        with ThreadPoolExecutor(2) as pool:
+            answers = list(pool.map(lambda _: ask(SUITE[0], 2)[0], range(2)))
+        check(answers == [expected[0]] * 2, "two queries at once both answer")
+    finally:
+        stop.set()
+        ingester.join()
+        http.shutdown()
+
+    leftover = [port for slot in range(8) for port in (fleet.Slot(slot).tcp_port, fleet.Slot(slot).http_port) if port_open(port)]
+    check(not leftover, "no fleet server outlives its query", f"ports still open: {leftover}")
+    check(not list((stack.DEV / "servers").glob("fleet-*")), "every fleet directory is gone")
+    print(f"{failures} failed")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

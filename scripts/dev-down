@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Stops what `scripts/dev-up` started. With --wipe, also deletes their state in .dev/.
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+dev=${BIGHOUSE_DEV_DIR:-$root/.dev}
+
+docker rm -f bighouse-s3proxy > /dev/null 2>&1 || true
+if [ -f "$dev/inodedb/pid" ]; then
+    kill "$(cat "$dev/inodedb/pid")" 2> /dev/null || true
+    rm -f "$dev/inodedb/pid"
+fi
+if [ "${1:-}" = "--wipe" ]; then
+    rm -rf "$dev"
+fi

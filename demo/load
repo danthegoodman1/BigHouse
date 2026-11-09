@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+"""Creates `demo.events` on the writer and fills it: `demo/load [rows]`, 20 million by default."""
+
+import sys
+import time
+
+from common import writer
+
+rows = int(sys.argv[1]) if len(sys.argv) > 1 else 20_000_000
+server = writer()
+server.query("CREATE DATABASE IF NOT EXISTS demo")
+server.query("DROP TABLE IF EXISTS demo.events SYNC")
+server.query("""
+    CREATE TABLE demo.events
+    (
+        time DateTime,
+        user_id UInt64,
+        kind LowCardinality(String),
+        url String,
+        duration_ms UInt32
+    )
+    ENGINE = MergeTree
+    PARTITION BY toYYYYMM(time)
+    ORDER BY (kind, user_id, time)
+""")
+started = time.monotonic()
+batch = 2_000_000
+for offset in range(0, rows, batch):
+    server.query(f"""
+        INSERT INTO demo.events
+        SELECT
+            toDateTime('2026-01-01 00:00:00') + intDiv(number, 7),
+            cityHash64(number) % 1000000,
+            ['view', 'click', 'purchase', 'scroll', 'share'][1 + number % 5],
+            concat('https://example.com/', toString(cityHash64(number, 1) % 50000)),
+            cityHash64(number, 2) % 5000
+        FROM numbers({offset}, {min(batch, rows - offset)})
+    """)
+print(f"loaded {rows:,} rows in {time.monotonic() - started:.1f} s;",
+      server.value("SELECT count() FROM system.parts WHERE database = 'demo' AND table = 'events' AND active"), "active parts")

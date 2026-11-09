@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+"""Stops the demo's writer. `scripts/dev-down` stops s3proxy and InodeDB."""
+
+from common import down
+
+down()
