@@ -39,7 +39,7 @@ jobs:
       - name: Install the toolchain
         run: |
           wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 21
-          sudo apt-get install -y ninja-build ccache
+          sudo apt-get install -y ninja-build ccache fuse3
 
       - uses: actions/cache@v4
         with:
@@ -65,11 +65,11 @@ jobs:
       - name: Start s3proxy and InodeDB
         run: scripts/dev-up
 
-      - name: Metadata unit tests
+      - name: Metadata and client unit tests
         run: |
           mkdir -p tmp && cd tmp
           INODEDB_TEST_ENDPOINT=127.0.0.1:7070 INODEDB_TEST_KEY=$(cat ../.dev/inodedb/admin.key) \
-            ../build/src/unit_tests_dbms --gtest_filter='Metadata/*'
+            ../build/src/unit_tests_dbms --gtest_filter='Metadata/*:InodeDBClientTest.*'
 
       - name: Features
         run: python3 tests/features.py
@@ -82,6 +82,9 @@ jobs:
 
       - name: Crash
         run: python3 tests/crash.py 20
+
+      - name: Abandoned claims
+        run: python3 tests/claims.py
 
       - name: Demo end to end
         run: python3 demo/e2e.py

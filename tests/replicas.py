@@ -3,7 +3,7 @@
 
 - The replica sees a new part, a dropped partition and a truncation within a few refreshes.
 - A query on the replica keeps reading parts the writer merged away and deleted, because the replica's InodeDB
-  lease holds their blobs; once the replica stops, the writer deletes them.
+  lease holds their blobs; once the replica stops, it releases the lease, and the writer deletes them.
 
     python3 tests/replicas.py
 """
@@ -59,8 +59,10 @@ def main() -> int:
     replica.start()
     try:
         writer.query("CREATE DATABASE r")
-        writer.query("CREATE TABLE r.t (p UInt8, k UInt64) ENGINE = MergeTree PARTITION BY p ORDER BY k")
-        writer.query("INSERT INTO r.t SELECT number % 3, number FROM numbers(3000)")
+        # Random strings keep blobs in every part, beyond what fits inline in InodeDB.
+        writer.query("CREATE TABLE r.t (p UInt8, k UInt64, v String DEFAULT randomPrintableASCII(100)) "
+                     "ENGINE = MergeTree PARTITION BY p ORDER BY k")
+        writer.query("INSERT INTO r.t (p, k) SELECT number % 3, number FROM numbers(3000)")
 
         replica.query("CREATE DATABASE r")
         for _, ddl in fleet.table_ddls(writer):
@@ -68,7 +70,7 @@ def main() -> int:
         count = lambda: replica.value("SELECT count() FROM r.t")  # noqa: E731
         check(count() == "3000", "the replica attaches the writer's table")
 
-        writer.query("INSERT INTO r.t SELECT 3, number FROM numbers(500)")
+        writer.query("INSERT INTO r.t (p, k) SELECT 3, number FROM numbers(500)")
         ok, got = eventually(count, "3500")
         check(ok, "the replica sees a new part", got)
 
@@ -81,11 +83,12 @@ def main() -> int:
         check(ok, "the replica sees a truncation", got)
 
         # A slow query on the replica, while the writer merges its parts and deletes the old ones.
-        writer.query("INSERT INTO r.t SELECT 1, number FROM numbers(2000)")
-        writer.query("INSERT INTO r.t SELECT 1, number + 2000 FROM numbers(2000)")
+        writer.query("INSERT INTO r.t (p, k) SELECT 1, number FROM numbers(2000)")
+        writer.query("INSERT INTO r.t (p, k) SELECT 1, number + 2000 FROM numbers(2000)")
         ok, _ = eventually(count, "4000")
         check(ok, "the replica sees two new parts")
         before = set(stack.s3_objects(prefix))
+        check(bool(before), "the parts keep blobs", "none")
 
         answer: dict[str, str] = {}
 
@@ -111,9 +114,12 @@ def main() -> int:
         held = before - set(stack.s3_objects(prefix))
         check(not held, "the writer deletes none of their blobs while the replica's lease holds them", f"{len(held)} gone")
 
+        # A stopping replica releases its lease, so the blobs go well before the lease's 30-second TTL would end it.
         replica.stop()
-        ok, _ = eventually(lambda: str(bool(before - set(stack.s3_objects(prefix)))), "True", timeout=60)
-        check(ok, "once the replica stops, the writer deletes the merged-away blobs")
+        stopped_at = time.monotonic()
+        ok, _ = eventually(lambda: str(bool(before - set(stack.s3_objects(prefix)))), "True", timeout=20)
+        check(ok, "once the replica stops and releases its lease, the writer deletes the merged-away blobs")
+        print(f"    deleted {time.monotonic() - stopped_at:.1f} s after the replica stopped")
     finally:
         replica.stop()
         writer.stop()

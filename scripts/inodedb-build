@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Builds the InodeDB server (`inodedb`) and CLI (`idb`) from the submodule into inodedb/target/release.
+# Builds the InodeDB server (`inodedb`) and CLI (`idb`, with `idb mount`) from the submodule into inodedb/target/release.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-cargo build --release --manifest-path "$root/inodedb/Cargo.toml" -p inodedb-server -p inodedb-cli
+cargo build --release --manifest-path "$root/inodedb/Cargo.toml" -p inodedb-server -p inodedb-cli --features inodedb-cli/mount

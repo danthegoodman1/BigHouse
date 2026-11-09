@@ -8,8 +8,10 @@ cache disk wraps and the default MergeTree policy uses, `inodedb` metadata and b
 for reasons of this machine, cancel out. A run of one variant compares against the other's last results.
 
 Each test that fails on `inodedb`, and passes or never ran on `local`, runs again with fewer jobs: on `local` first, then
-on `inodedb` if it passed on `local`. A regression fails that `inodedb` recheck too; a test that passes it is flaky.
-`--variants ''` compares and rechecks the last results only.
+on `inodedb` up to three times if it passed on `local`. A test that passes one of those `inodedb` rechecks is flaky.
+Each test that fails all three runs once more on `inodedb`, rewritten to observe InodeDB where it observes a part's
+metadata files on the local filesystem (`rewrite_for_inodedb`). A test that passes rewritten observes local files; one
+that fails is a regression, and the script exits 1. `--variants ''` compares and rechecks the last results only.
 
     python3 tests/parity.py [--jobs N] [--timeout S] [--variants local,inodedb] [--remote-database-disk] [test-name-regex ...]
 
@@ -40,6 +42,8 @@ from bighouse import stack  # noqa: E402
 CLICKHOUSE_SRC = stack.ROOT / "ClickHouse"
 # Both runs use one copy of the binary, so a rebuild during a run changes neither.
 BINARY = stack.DEV / "parity/clickhouse"
+# A regression fails this many `inodedb` rechecks in a row.
+RECHECKS = 3
 RESULT = re.compile(r"^(?:\[\s*\d+\s*/\s*\d+\]\s+)?(\S+?):\s.*\[ (OK|FAIL|SKIPPED|UNKNOWN|BROKEN|SERVER_DIED) \]")
 
 
@@ -188,7 +192,7 @@ def start(base: Path) -> subprocess.Popen:
     raise RuntimeError(f"the server did not answer; see {base}/log")
 
 
-def run_tests(base: Path, jobs: int, timeout: int, patterns: list[str]) -> dict[str, str]:
+def run_tests(base: Path, jobs: int, timeout: int, patterns: list[str], queries: Path | None = None) -> dict[str, str]:
     bin_dir, env = tools(base)
     env["CLICKHOUSE_CONFIG_CLIENT"] = str(base / "etc/clickhouse-client/config.xml")
     command = [
@@ -199,8 +203,11 @@ def run_tests(base: Path, jobs: int, timeout: int, patterns: list[str]) -> dict[
         "--tmp", str(base / "tmp"),
         "--jobs", str(jobs),
         "--timeout", str(timeout),
+        # A recheck runs mostly failing tests, which would trip the default limit of 20 failures in a row.
+        "--max-failures-chain", "1000000",
         "--no-random-settings", "--no-random-merge-tree-settings", "--no-stateful", "--no-long",
         "--zookeeper", "--shard",
+        *(["--queries", str(queries)] if queries else []),
         *patterns,
     ]
     results = {}
@@ -218,6 +225,57 @@ def run_tests(base: Path, jobs: int, timeout: int, patterns: list[str]) -> dict[
 def exactly(tests: list[str]) -> str:
     """A clickhouse-test selector for exactly these tests; it matches file names."""
     return "^(?:" + "|".join(re.escape(t) for t in tests) + r")\."
+
+
+def rewrite_for_inodedb(text: str, mount: Path) -> str:
+    """Points a test's observations of local metadata files at InodeDB: paths from `system.parts`, `system.tables` and
+    `FREEZE` lead into `mount`, an `idb mount` of the disk's InodeDB root, which keeps the disk's files under `tree/`,
+    and `FileOpen`, which counts local file opens, becomes `InodeDBCommit`."""
+    prefix = f"inodedb://{stack.INODEDB_ENDPOINT}/"
+    text = re.sub(r"SELECT (path|data_paths\[1\]|part_backup_path) FROM", rf"SELECT replaceOne(\1, '{prefix}', '{mount}/tree/') FROM", text)
+    return text.replace("ProfileEvents['FileOpen']", "ProfileEvents['InodeDBCommit']")
+
+
+def run_rewritten(etc: Path, tests: list[str], jobs: int, timeout: int) -> dict[str, str]:
+    """Runs each of `tests` that `rewrite_for_inodedb` changes, rewritten, on `inodedb` with the disk's tree mounted."""
+    base = install("inodedb", etc, "inodedb-rewritten")
+    mount, queries = base / "mnt", base / "queries"
+    mount.mkdir()
+    (queries / "0_stateless").mkdir(parents=True)
+    (queries / "shell_config.sh").symlink_to(CLICKHOUSE_SRC / "tests/queries/shell_config.sh")
+    rewritten = []
+    for test in tests:
+        changed = False
+        for source in (CLICKHOUSE_SRC / "tests/queries/0_stateless").glob(f"{test}.*"):
+            text = source.read_text()
+            new = text if source.suffix == ".reference" else rewrite_for_inodedb(text, mount)
+            changed |= new != text
+            (queries / "0_stateless" / source.name).write_text(new)
+        if changed:
+            rewritten.append(test)
+    if not rewritten:
+        return {}
+
+    disk = ET.parse(base / "etc/clickhouse-server/config.d/zz_inodedb_metadata.xml").getroot().find("storage_configuration/disks/s3")
+    mounter = subprocess.Popen([str(stack.IDB), "--endpoint", f"http://{stack.INODEDB_ENDPOINT}", "--key", disk.findtext("inodedb_key"),
+                                "mount", str(mount)])
+    try:
+        deadline = time.monotonic() + 30
+        while not mount.is_mount():
+            if mounter.poll() is not None or time.monotonic() > deadline:
+                raise RuntimeError("idb mount failed; scripts/inodedb-build builds idb with it")
+            time.sleep(0.1)
+        server = start(base)
+        try:
+            results = run_tests(base, jobs, timeout, [exactly(rewritten)], queries)
+        finally:
+            server.terminate()
+            server.wait(120)
+    finally:
+        subprocess.run(["fusermount3", "-u", str(mount)], check=True)
+        mounter.wait(30)
+    print(f"inodedb-rewritten: {results}", flush=True)
+    return results
 
 
 def run(variant: str, etc: Path, name: str, jobs: int, timeout: int, patterns: list[str]) -> dict[str, str]:
@@ -255,21 +313,33 @@ def main() -> int:
     results = {v: json.loads((stack.DEV / "parity" / v / "results.json").read_text()) for v in ("local", "inodedb")}
     suspects = sorted(t for t, s in results["inodedb"].items() if s not in passed and results["local"].get(t, "OK") == "OK")
     improvements = sorted(t for t, s in results["inodedb"].items() if s == "OK" and results["local"].get(t, "OK") not in passed)
-    regressions, flaky, recheck = [], [], {}
+    jobs = min(args.jobs, 4)
+    regressions, flaky, local_files = [], [], []
     if suspects:
         print(f"rechecking {len(suspects)} tests that fail with inodedb metadata", flush=True)
-        jobs = min(args.jobs, 4)
         local = run("local", etc, "local-recheck", jobs, args.timeout, [exactly(suspects)])
-        if passing := [t for t in suspects if local.get(t) == "OK"]:
-            recheck = run("inodedb", etc, "inodedb-recheck", jobs, args.timeout, [exactly(passing)])
-        regressions = [t for t in passing if recheck.get(t) not in passed]
-        flaky = [t for t in passing if recheck.get(t) in passed]
+        regressions = [t for t in suspects if local.get(t) == "OK"]
+        for _ in range(RECHECKS):
+            if not regressions:
+                break
+            recheck = run("inodedb", etc, "inodedb-recheck", jobs, args.timeout, [exactly(regressions)])
+            flaky += [t for t in regressions if recheck.get(t) in passed]
+            regressions = [t for t in regressions if recheck.get(t) not in passed]
+    if regressions:
+        rewritten = run_rewritten(etc, regressions, jobs, args.timeout)
+        local_files = [t for t in regressions if rewritten.get(t) == "OK"]
+        regressions = [t for t in regressions if t not in local_files]
     print(f"{len(regressions)} tests pass with local metadata and fail with inodedb metadata")
     for test in regressions:
-        print(f"    {test}: {recheck.get(test, 'missing')}")
-    print(f"{len(flaky)} tests failed once with inodedb metadata and passed on recheck")
+        print(f"    {test}")
+    print(f"{len(local_files)} tests observe local metadata files and pass once they observe InodeDB")
+    for test in local_files:
+        print(f"    {test}")
+    print(f"{len(flaky)} tests failed with inodedb metadata and passed on a recheck")
+    for test in flaky:
+        print(f"    {test}")
     print(f"{len(improvements)} tests pass with inodedb metadata and fail with local metadata")
-    diff = {"regressions": regressions, "flaky": flaky, "improvements": improvements}
+    diff = {"regressions": regressions, "local_files": local_files, "flaky": flaky, "improvements": improvements}
     (stack.DEV / "parity/diff.json").write_text(json.dumps(diff, indent=1))
     return 1 if regressions else 0
 

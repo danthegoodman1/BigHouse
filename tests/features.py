@@ -55,6 +55,11 @@ def make_server() -> stack.Server:
     return server
 
 
+def check_table(s: stack.Server, table: str) -> str:
+    """`CHECK TABLE`'s rows, one per part, in a fixed order."""
+    return "".join(sorted(s.query(f"CHECK TABLE {table}").splitlines(keepends=True)))
+
+
 def scenario_insert_merge(s: stack.Server, p: str) -> list[str]:
     s.query(f"CREATE TABLE t (k UInt64, v String) ENGINE = MergeTree ORDER BY k SETTINGS storage_policy = '{p}'")
     for i in range(3):
@@ -62,7 +67,7 @@ def scenario_insert_merge(s: stack.Server, p: str) -> list[str]:
     out = [s.query("SELECT count(), sum(k), max(v) FROM t"), s.query("SELECT count() FROM system.parts WHERE table = 't' AND active")]
     s.query("OPTIMIZE TABLE t FINAL")
     out += [s.query("SELECT count(), sum(k) FROM t"), s.query("SELECT count() FROM system.parts WHERE table = 't' AND active")]
-    out.append(s.query("CHECK TABLE t"))
+    out.append(check_table(s, "t"))
     return out
 
 
@@ -79,7 +84,7 @@ def scenario_mutations(s: stack.Server, p: str) -> list[str]:
     s.query("ALTER TABLE t MATERIALIZE COLUMN c", settings={"mutations_sync": 2})
     s.query("ALTER TABLE t DROP COLUMN b", settings={"mutations_sync": 2})
     out.append(s.query("SELECT sum(a), sum(c), count() FROM t"))
-    out.append(s.query("CHECK TABLE t"))
+    out.append(check_table(s, "t"))
     return out
 
 
@@ -129,7 +134,7 @@ def scenario_ttl_projection_index(s: stack.Server, p: str) -> list[str]:
         s.query("SELECT count() FROM t"),
         s.query("SELECT s, count() FROM t GROUP BY s ORDER BY s"),
         s.query("SELECT count() FROM t WHERE s = '3'"),
-        s.query("CHECK TABLE t"),
+        check_table(s, "t"),
     ]
 
 
@@ -179,7 +184,7 @@ def scenario_cache_and_encryption(s: stack.Server, p: str) -> list[str]:
     s.query("OPTIMIZE TABLE t FINAL")
     s.query("ALTER TABLE t UPDATE v = 'x' WHERE k % 7 = 0", settings={"mutations_sync": 2})
     s.query("SYSTEM DROP FILESYSTEM CACHE")
-    return [s.query("SELECT count(), sum(k), countIf(v = 'x') FROM t"), s.query("CHECK TABLE t")]
+    return [s.query("SELECT count(), sum(k), countIf(v = 'x') FROM t"), check_table(s, "t")]
 
 
 def scenario_lightweight_update(s: stack.Server, p: str) -> list[str]:
@@ -189,7 +194,7 @@ def scenario_lightweight_update(s: stack.Server, p: str) -> list[str]:
     s.query("UPDATE t SET v = v * 10 WHERE k % 3 = 0")
     out = [s.query("SELECT sum(v), count() FROM t")]
     s.query("OPTIMIZE TABLE t FINAL")
-    out += [s.query("SELECT sum(v), count() FROM t"), s.query("CHECK TABLE t")]
+    out += [s.query("SELECT sum(v), count() FROM t"), check_table(s, "t")]
     return out
 
 
@@ -202,7 +207,7 @@ def scenario_backup_to_s3(s: stack.Server, p: str) -> list[str]:
     s.query(f"BACKUP TABLE t TO {target}")
     s.query("DROP TABLE t SYNC")
     s.query(f"RESTORE TABLE t FROM {target}")
-    return [s.query("SELECT count(), sum(k), max(v) FROM t"), s.query("CHECK TABLE t")]
+    return [s.query("SELECT count(), sum(k), max(v) FROM t"), check_table(s, "t")]
 
 
 def scenario_replicated(s: stack.Server, p: str) -> list[str]:
@@ -220,8 +225,8 @@ def scenario_replicated(s: stack.Server, p: str) -> list[str]:
     out = []
     for replica in ("r1", "r2"):
         out += [s.query(f"SELECT count(), sum(k), max(v) FROM t_{replica}"),
-                s.query(f"SELECT name FROM system.parts WHERE table = 't_{replica}' AND active"),
-                s.query(f"CHECK TABLE t_{replica}")]
+                s.query(f"SELECT name FROM system.parts WHERE table = 't_{replica}' AND active ORDER BY name"),
+                check_table(s, f"t_{replica}")]
     return out
 
 
@@ -233,7 +238,7 @@ def scenario_move_between_disks(s: stack.Server, p: str) -> list[str]:
     s.query("ALTER TABLE t MOVE PARTITION tuple() TO DISK 's3_inodedb'")
     out = [s.query("SELECT disk_name, count() FROM system.parts WHERE table = 't' AND active GROUP BY disk_name")]
     s.query("ALTER TABLE t MOVE PARTITION tuple() TO DISK 'default'")
-    out += [s.query("SELECT disk_name FROM system.parts WHERE table = 't' AND active"), s.query("SELECT sum(k) FROM t")]
+    out += [s.query("SELECT disk_name FROM system.parts WHERE table = 't' AND active ORDER BY disk_name"), s.query("SELECT sum(k) FROM t")]
     return out
 
 

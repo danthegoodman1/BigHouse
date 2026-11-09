@@ -50,7 +50,7 @@ scripts/inodedb-build             # inodedb/target/release/{inodedb,idb}
 scripts/dev-up                    # s3proxy on 127.0.0.1:11111 and InodeDB on 127.0.0.1:7070
 ```
 
-`scripts/clickhouse-build` needs clang 21, CMake, Ninja and ccache; `scripts/inodedb-build` needs Rust; `scripts/dev-up` needs Docker. Then follow [demo/README.md](demo/README.md).
+`scripts/clickhouse-build` needs clang 21, CMake, Ninja and ccache; `scripts/inodedb-build` needs Rust; `scripts/dev-up` needs Docker; `tests/parity.py` needs FUSE (`fusermount3`). Then follow [demo/README.md](demo/README.md).
 
 ## Tests
 
@@ -58,13 +58,14 @@ Each suite runs against the stack `scripts/dev-up` starts and the server in `bui
 
 | Command | Checks |
 | --- | --- |
-| `build/src/unit_tests_dbms --gtest_filter='Metadata/*'` with `INODEDB_TEST_ENDPOINT` and `INODEDB_TEST_KEY` set | Every metadata storage case against `local` and `inodedb` metadata (`scripts/clickhouse-build unit_tests_dbms` builds it). |
+| `build/src/unit_tests_dbms --gtest_filter='Metadata/*:InodeDBClientTest.*'` with `INODEDB_TEST_ENDPOINT` and `INODEDB_TEST_KEY` set | Every metadata storage case against `local` and `inodedb` metadata, and the InodeDB client's standby redirect and retried commit (`scripts/clickhouse-build unit_tests_dbms` builds it). |
 | `python3 tests/features.py` | Each feature on both metadata types, with equal answers, then restart and blob cleanup. |
 | `python3 tests/crash.py [rounds]` | `SIGKILL` under a mixed workload: tables stay consistent and no record names a deleted blob. |
+| `python3 tests/claims.py` | A writer killed between claiming freed files and deleting their blobs leaks none: the restarted writer deletes them once the claims expire. Pauses s3proxy, so run it alone. |
 | `python3 tests/fence.py` | A second writer takes the disk, and the first can no longer write. |
-| `python3 tests/replicas.py` | A replica sees the writer's parts and drops, and its queries outlive the writer's cleanup. |
-| `python3 tests/parity.py` | ClickHouse's stateless tests on S3 with `local` and with `inodedb` metadata; lists tests that pass only on `local`. |
-| `python3 tests/bench.py` | Insert rate and cold start against `local` metadata ([BENCHMARKS.md](BENCHMARKS.md)). |
+| `python3 tests/replicas.py` | A replica sees the writer's parts and drops, its queries outlive the writer's cleanup, and its lease ends when it stops. |
+| `python3 tests/parity.py` | ClickHouse's stateless tests on S3 with `local` and with `inodedb` metadata. Rechecks each `inodedb` failure, reruns tests that read local metadata files against an `idb mount` of InodeDB's tree, and exits 1 on any test that passes only on `local`. |
+| `python3 tests/bench.py [--tmpfs]` | Insert rate and cold start against `local` metadata, with InodeDB's store on the drive or in `/dev/shm` ([BENCHMARKS.md](BENCHMARKS.md)). |
 | `python3 demo/e2e.py` | The query API answers as the writer does at fleet sizes 1, 2 and 4. |
 
 ## License

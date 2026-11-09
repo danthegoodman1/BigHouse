@@ -17,7 +17,7 @@ Each table has one writer. The demo runs on one machine with s3proxy standing in
 | `inodedb/` | Submodule: InodeDB at the revision the client's `proto/inodedb.proto` copies. |
 | `scripts/` | `clickhouse-build`, `inodedb-build`, `dev-up`, `dev-down`. |
 | `bighouse/` | `stack.py` (keys, disk configs, servers), `fleet.py` (slots and fleets), `api.py` (the query API). |
-| `tests/` | `features.py`, `crash.py`, `fence.py`, `replicas.py`, `parity.py`, `bench.py`. |
+| `tests/` | `features.py`, `crash.py`, `claims.py`, `fence.py`, `replicas.py`, `parity.py`, `bench.py`. |
 | `demo/` | `up`, `down`, `load`, `e2e.py`. |
 
 ## Implementation Principles
@@ -42,19 +42,21 @@ Each table has one writer. The demo runs on one machine with s3proxy standing in
 | `src/Disks/DiskObjectStorage/MetadataStorages/Cache/MetadataStorageFromCacheObjectStorage.{h,cpp}` | Delegates `getInlineFileMaxBytes`. | Inline files under the `cache` wrapper. |
 | `src/Disks/DiskObjectStorage/DiskObjectStorageTransaction.cpp` | `writeFile` inlines up to the larger of the write settings' and the metadata storage's threshold. | Inline files. |
 | `src/Disks/DiskObjectStorage/DiskObjectStorage.h` | `supportZeroCopyReplication` returns false for `InodeDB`. | Zero-copy writes received metadata to local files. |
+| `src/Storages/MergeTree/DataPartStorageOnDiskBase.cpp` | `rename` sets the directory's modification time and moves it in one disk transaction when the part has none open. | One InodeDB commit per rename, not two. |
 | `src/Backups/BackupEntryWithChecksumCalculation.cpp` | A non-empty file without blobs takes its checksum from its bytes. | Backups of inline files. |
 | `src/Common/ProfileEvents.cpp` | `InodeDB*` events. | Call counts in `system.events`. |
 | `src/Disks/tests/gtest_metadata_local_disk.cpp` | Runs every case against `local` and `inodedb`, plus `inodedb`-only inline and spill cases. | Unit parity. |
+| `src/Disks/tests/gtest_inodedb_client.cpp` | The client's standby redirect and retried commit, through a fault-injecting proxy. | Client behavior on failover and lost answers. |
 
 ## Testing Strategy
 
-- **Unit.** `ClickHouse/src/Disks/tests/gtest_metadata_local_disk.cpp` runs every case against both metadata types; the `inodedb` cases need `INODEDB_TEST_ENDPOINT` and `INODEDB_TEST_KEY`.
-- **Parity.** `tests/parity.py` runs ClickHouse's stateless tests in `--s3-storage` mode twice over s3proxy, once with `local` metadata and once with `inodedb`, from one install of the test configs, and reruns each `inodedb` failure on both variants to separate regressions from flaky tests. `inodedb` must pass every test `local` passes; each exception gets a ledger row with its cause.
+- **Unit.** `ClickHouse/src/Disks/tests/gtest_metadata_local_disk.cpp` runs every case against both metadata types, and `gtest_inodedb_client.cpp` tests the client's redirect and retry; the InodeDB cases need `INODEDB_TEST_ENDPOINT` and `INODEDB_TEST_KEY`.
+- **Parity.** `tests/parity.py` runs ClickHouse's stateless tests twice over s3proxy with every MergeTree table on an S3 disk, once with `local` metadata and once with `inodedb`, from one install of the test configs (`install.sh --s3-storage`). It runs the tests tagged `no-object-storage` too, since an S3 disk with `local` metadata passes them. Each `inodedb` failure reruns on `local`, then up to three times on `inodedb`, to separate regressions from flaky tests; a test that fails all three reruns once more, rewritten to observe InodeDB's tree through `idb mount` where it observes local metadata files. `inodedb` must pass every test `local` passes, and the script exits 1 otherwise.
 - **Features.** `tests/features.py` runs each feature scenario on both metadata types in one server and requires equal answers, then checks restart and blob cleanup.
 - **Crash.** `tests/crash.py` kills the writer with `SIGKILL` under a mixed workload, restarts it, and checks `CHECK TABLE`, acknowledged batches, partial batches and blobs that records name.
 - **Replicas.** `tests/replicas.py`: a writer and a replica; new parts appear, drops vanish, and queries outlive the writer's cleanup.
 - **End to end.** `demo/e2e.py`: the query API returns the writer's answers at fleet sizes 1, 2 and 4.
-- **Benchmarks.** `tests/bench.py` against `local` metadata, recorded in `BENCHMARKS.md`.
+- **Benchmarks.** `tests/bench.py` against `local` metadata, with InodeDB's store on the drive and on tmpfs (`--tmpfs`), recorded in `BENCHMARKS.md`.
 - **CI.** GitHub Actions runs s3proxy and InodeDB, builds ClickHouse with a restored ccache, and runs the suites. The full stateless parity run runs on demand.
 
 ## Phase 0: Foundations
@@ -113,7 +115,7 @@ Status ledger:
 | --- | --- | --- | --- |
 | Complete | Decision | 1A: C++ gRPC client | ClickHouse's Rust workspace vendors no tokio, tonic or prost, so a bridge over InodeDB's Rust client meant vendoring an async stack. The client uses `contrib/grpc` and `PROTOBUF_GENERATE_GRPC_CPP` (`InodeDB/proto/CMakeLists.txt`), with no Rust. |
 | Complete | Work | 1D: `InodeDB::Client` | `InodeDB/InodeDBClient.{h,cpp}`: `Commit` with a random 16-byte request id, `Stat`, `Read`, paged `List` that resumes after its last entry, `ClaimFreed`, `AckFreed`, `MintKey`, and `Lease` streams. Retries `UNAVAILABLE` and `DEADLINE_EXCEEDED` with backoff, follows `not-writer` redirects, and counts every call in `InodeDB*` ProfileEvents. |
-| Incomplete | Test | Writer redirect and a retried batch applied once | Request-id deduplication is InodeDB's, tested there. Missing: a ClickHouse-side test against an InodeDB standby, and one that drops a commit response. |
+| Complete | Test | Writer redirect and a retried batch applied once | `src/Disks/tests/gtest_inodedb_client.cpp` puts an in-process gRPC proxy before InodeDB. `StandbyRedirectsToTheWriter`: the proxy answers as a standby, and the client commits through the writer it names and sends later calls there directly. `RetriedCommitAppliesOnce`: the proxy forwards a mkdir and drops its answer; the retry carries the same request id and gets `applied`, while a new commit of the same mkdir fails with `EXISTS`. Both pass. |
 | Complete | Gate | Metadata gtests pass against InodeDB | `unit_tests_dbms --gtest_filter='Metadata/MetadataDiskTest.*'`: 79 passed, 3 skipped: `TestRecursiveCyclicRemove/inodedb`, which corrupts `local`'s files on disk, and the `local` runs of the two `inodedb`-only cases. |
 
 ## Phase 2: The `inodedb` Metadata Type at Parity
@@ -151,11 +153,13 @@ Status ledger:
 | Complete | Decision | `getLastChanged` | The value carries a change time, set whenever the disk writes the value; `getLastChanged` returns it for files and `mtime` for directories. |
 | Complete | Decision | Records over 64 KiB | A record past `inodedb_spill_threshold` (32 KiB) moves to a blob. Rewriting the record frees the previous spill blob through a tombstone, and removing the file deletes the spill blob after the blobs it names. Gtest `TestSpilledRecord`; the `log_engines` scenario appends past the threshold. |
 | Complete | Test | Parity gtests | 79 passed, 3 skipped (Phase 1 gate). |
-| In Progress | Test | Stateless parity run | `tests/parity.py` runs both variants from one install. Smoke `'^0000[1-9]_'`: 9 OK and 8 skipped on each. Missing: the full run's diff. |
+| Complete | Test | Stateless parity run | `tests/parity.py` exits 0. The `inodedb` pass ran 17,275 tests: 15,223 OK, 1,096 failed, 956 skipped. The `local` pass ran 16,454 before it stopped in the sequential tests: 14,614 OK, 983 failed, 857 skipped. Of the 114 tests that failed on `inodedb` and passed or never ran on `local`, 108 fail on `local` too, one is flaky, and five read local metadata files (rows below). `.dev/parity/diff.json`: no regressions. |
 | Complete | Test | 2G feature checks | `tests/features.py`, with inline files on, passes all 13 scenarios with equal answers on both types: `insert_merge`, `mutations`, `partitions` (`ATTACH PARTITION FROM`, `REPLACE PARTITION`, `MOVE PARTITION TO TABLE`, detached parts), `freeze`, `ttl_projection_index`, `log_engines`, `tables`, `backup`, `cache_and_encryption`, `lightweight_update`, `backup_to_s3`, `replicated` (two `ReplicatedMergeTree` replicas over an embedded Keeper) and `move_between_disks`; then restart and blob cleanup. `database_disk` runs in `tests/parity.py --remote-database-disk`. |
 | Incomplete | Test | `database_disk` on the `inodedb` disk | Missing: a `tests/parity.py --remote-database-disk` diff. |
 | Complete | Decision | Zero-copy replication | Zero-copy ships each part's local metadata files to the other replica, and the receiver writes them to its local filesystem (`Fetcher::fetchSelectedPart`), so upstream turns it off for `keeper` and `memory` metadata. `DiskObjectStorage::supportZeroCopyReplication` turns it off for `inodedb` too, and replicated tables fetch whole parts; BigHouse's replicas share the writer's tree instead. With it on, the sender failed with `Remote metadata 'checksums.txt' is not exists` and the fetch retried forever; now `tests/features.py replicated` passes with `allow_remote_fs_zero_copy_replication = 1` on both types, and both disks remove every blob afterward. |
-| Incomplete | Gate | No failure unique to `inodedb` | Missing: the full parity diff and its exception rows. |
+| Complete | Decision | Tests that read local metadata files | `02378_part_log_profile_events` sums `FileOpen`, which counts local file opens; `03100_lwu_59_freeze_detach_keep_invalidated_columns`, `04429_drop_index_sibling_suffix_collision`, `04538_packed_clone_hardlinks_data_packed` and `04758_part_minmax_block_columns_files_prefix` run `find`, `test -e`, `test -f` or `stat` on paths from `system.parts`, `system.tables` and `FREEZE`. The last four carry upstream's `no-object-storage` tag. `parity.py` (`rewrite_for_inodedb`) points those paths into an `idb mount` of the disk's tree and swaps `FileOpen` for `InodeDBCommit`; rewritten, all five pass against the original references: the clone shares `data.packed`'s inode, frozen and detached copies keep `invalidated_system_columns.txt`, the minmax files form a prefix, `DROP INDEX` keeps the survivor's files, and each mutation commits. |
+| Complete | Decision | `02725_memory-for-merges` is flaky on both types | It requires the summed peak memory of a table's merges to stay under 200 MiB. Six runs per disk of its workload ran two merges (one a single-part rewrite) three times of six on `local` and on `inodedb`, and two merges always pass the limit (204 to 226 MiB); one merge peaked at 116 to 135 MiB on both. It failed the first `inodedb` recheck and passed the second. |
+| Complete | Gate | No failure unique to `inodedb` | `tests/parity.py --variants ''` reports 0 regressions, 5 tests that read local metadata files, and 1 flaky test (`.dev/parity/diff.json`). |
 
 ## Phase 3: Durability, Fencing and Crash Safety
 
@@ -181,9 +185,9 @@ Status ledger:
 | --- | --- | --- | --- |
 | Complete | Work | 3A: Owner fence | `startup` commits `owner` and keeps its version; every batch carries `when VersionIs(owner, version)`, and a skipped `when` throws `TABLE_IS_READ_ONLY`. `tests/fence.py`: once a second writer starts, the first's insert fails and applies nothing, and the second reads what the first committed and inserts. |
 | Complete | Work | 3B: Exactly-once commits | Every `Commit` carries one request id across its retries (`InodeDBClient.cpp`), which InodeDB deduplicates. |
-| In Progress | Test | 3C: Crash loops | `tests/crash.py`: 20 of 20 rounds of inserts, `OPTIMIZE`, mutations and truncation passed, with 768 batches acknowledged and no lost blobs. Missing: 100 rounds. |
-| Incomplete | Test | 3D: Abandoned claims | Missing: a test that kills the writer between `ClaimFreed` and `AckFreed` and finds the blobs deleted after the claim TTL. |
-| Incomplete | Gate | Consistent after every crash round | Missing: the 100-round run. |
+| Complete | Test | 3C: Crash loops | `tests/crash.py 100`, with inline files on: 100 of 100 rounds of inserts, `OPTIMIZE`, mutations and truncation passed, with 3,211 batches acknowledged by the last round, every restart under 1.6 s, and every blob a record names present. |
+| Complete | Test | 3D: Abandoned claims | `tests/claims.py`: pauses s3proxy so the writer's deletes hang after it claims a dropped table's freed files, kills the writer, and resumes s3proxy. The killed writer deleted none of the claimed blobs, and the restarted writer deleted all of them 27 s after the kill. |
+| Complete | Gate | Consistent after every crash round | 3C and 3D. |
 
 ## Phase 4: Commit Path Performance
 
@@ -209,11 +213,11 @@ Status ledger:
 | Status | Type | Item | Evidence / Gap |
 | --- | --- | --- | --- |
 | Complete | Work | 4A: Cached reads | `InodeDB/InodeDBMetadataCache.{h,cpp}`: reading a file lists its directory with values, so one `List` serves a part's files. A commit invalidates the paths and subtrees it touched and the other names of inodes it changed; a read keeps its answer only if no commit landed since it began. Replicas forget listings on refresh. Link counts read uncached. |
-| In Progress | Work | 4B: One commit per part | `MergeTreeDataWriter` writes a part inside one disk transaction, which commits as one batch, and the rename to the part's name is a second. Missing: commits per insert from `tests/bench.py`. |
+| Complete | Work | 4B: One commit per part | `MergeTreeDataWriter` writes a part inside one disk transaction, which commits as one batch. The rename to the part's name commits once more, together with the directory's modification time (`DataPartStorageOnDiskBase::rename`, which had committed them separately). `tests/bench.py`: 2.0 InodeDB commits per insert. `MergeTreeSink::commitPart` renames under the table's parts lock, so one table's renames commit in sequence (`BENCHMARKS.md`). |
 | Blocked | Work | 4C: Orphan sweep | Blobs uploaded before a crash and never committed stay in S3, as with `local` metadata, which has no sweep either. A safe sweep must know every blob a committed state can still reach, including free-queue entries a lease holds. Blocked by: an InodeDB call that lists free-queue entries without claiming them. |
-| In Progress | Work | 4D: Inline small files | Files up to `inodedb_inline_file_max_bytes` (16 KiB) keep their bytes in the record. `writeInlineDataToFile` rewrites the file as `MetadataStorageFromMemory` does; an append moves inline bytes to a blob first; truncation cuts inline bytes; backups checksum inline files by their bytes. Gtest `TestInlineRewriteAppendTruncate`; `tests/features.py` passes with inline files on. Missing: the crash and parity reruns. |
-| Incomplete | Test | 4E: Benchmarks | Missing: `BENCHMARKS.md`. |
-| Incomplete | Gate | Benchmarks recorded, parity intact | Missing: benchmarks and a parity diff with inline files on. |
+| Complete | Work | 4D: Inline small files | Files up to `inodedb_inline_file_max_bytes` (16 KiB) keep their bytes in the record. `writeInlineDataToFile` rewrites the file as `MetadataStorageFromMemory` does; an append moves inline bytes to a blob first; truncation cuts inline bytes; backups checksum inline files by their bytes. Gtest `TestInlineRewriteAppendTruncate`; `tests/features.py`, `tests/crash.py 100` and the parity run pass with inline files on. `tests/bench.py`: a 1,000-row part uploads no blob, and 10,000 parts load in 1.2 s against `local`'s 2.3 s. |
+| Complete | Test | 4E: Benchmarks | `BENCHMARKS.md`. With InodeDB's store on this machine's NVMe drive (2 ms `fdatasync`), `inodedb` takes 83 inserts/s on one thread against `local`'s 312 and 87 s for 10,000 parts against 5.5 s; with the store on tmpfs, 318 against 316 and 4.8 s against 4.0 s. Cold start: 1.2 s against 2.3 s. |
+| In Progress | Gate | Benchmarks recorded, parity intact | `BENCHMARKS.md`; the parity run with inline files on reports no regressions. Missing: a parity rerun on the build with the single-commit rename. |
 
 ## Phase 5: Read Replicas
 
@@ -241,10 +245,10 @@ Status ledger:
 | Complete | Work | 5A: Read-only mode | `inodedb_read_only`, or the object storage's `readonly`, makes `isReadOnly` true; `refresh` forgets cached listings. `fleet.replica_disk_xml` sets both, so `MergeTree` treats the tables as static. |
 | Complete | Decision | 5B: One snapshot per fleet | Parallel replicas read the parts the coordinator's first announcing replica lists (`DefaultCoordinator::initializeReadingState`), so a fleet reads one state without pinning an InodeDB version. `demo/e2e.py` checks whole batches mid-ingest at 1, 2 and 4 servers. |
 | Complete | Work | 5C: Dropped parts on refresh | `MergeTreeData::refreshDataPartsOnce` (ClickHouse files changes table). `tests/replicas.py`: new part, dropped partition and truncation each reach the replica. |
-| Complete | Work | 5D: Reader leases | `InodeDBReaderLease` beats every 10 s and releases versions it read more than `inodedb_lease_lag_ms` ago. `tests/replicas.py`: a slow replica query reads parts the writer merged away and deleted; no blob goes while the lease holds it, and the writer deletes them once the replica stops. |
+| Complete | Work | 5D: Reader leases | `InodeDBReaderLease` beats every 10 s, releases versions it read more than `inodedb_lease_lag_ms` ago, and releases the lease when the disk shuts down, cancelling its stream only after an attempt's deadline. `tests/replicas.py`: a slow replica query reads parts the writer merged away and deleted; no blob goes while the lease holds it, and the writer deletes them 0.2 s after the replica stops, within the test's 20 s bound and well inside the 30 s lease TTL. |
 | Incomplete | Work | 5E: Table discovery | Fleets attach tables from the writer's `SHOW CREATE TABLE` per query (`fleet.table_ddls`). Missing: schema propagation for long-lived replicas, through `database_disk` on the `inodedb` disk, and an `ALTER` test. |
 | Complete | Work | 5F: Scoped read keys | `bighouse/api.py` mints a read key rooted at the writer's directory with a 15-minute TTL per query and revokes it after. `tests/fence.py`: a read key cannot write. |
-| In Progress | Gate | Replicas track the writer and keep their queries | `tests/replicas.py`: 9 of 9 checks pass. Missing: 5E. |
+| In Progress | Gate | Replicas track the writer and keep their queries | `tests/replicas.py`: 10 of 10 checks pass. Missing: 5E. |
 
 ## Phase 6: The BigHouse Query API
 

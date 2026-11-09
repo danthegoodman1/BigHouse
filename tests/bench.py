@@ -8,15 +8,22 @@ Three disks take the same work: `local` metadata, `inodedb` metadata, and `inode
 - Cold start: a table of many parts on each disk in turn. Restarts the server with only that table attached and
   reports the seconds until the table answers, and object-storage and InodeDB reads during the load.
 
-    python3 tests/bench.py [--inserts N] [--parts N]
+Each InodeDB commit waits for its store's sync. `--tmpfs` runs an InodeDB of its own on 127.0.0.1:7071 with its
+store in /dev/shm, which stands in for a drive whose syncs take microseconds.
 
-Prints a Markdown table and writes .dev/bench/results.json. Needs `scripts/dev-up` and a built server.
+    python3 tests/bench.py [--inserts N] [--parts N] [--tmpfs]
+
+Prints a Markdown table and writes .dev/bench/results.json (results-tmpfs.json with `--tmpfs`). Needs
+`scripts/dev-up` and a built server.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import shutil
+import socket
+import subprocess
 import sys
 import time
 import uuid
@@ -31,6 +38,32 @@ DISKS = ("local", "inodedb", "inodedb_blobs")
 WRITES = ("DiskS3PutObject", "DiskS3CreateMultipartUpload", "DiskS3UploadPart")
 READS = ("DiskS3GetObject", "DiskS3HeadObject")
 INODEDB_READS = ("InodeDBStat", "InodeDBRead", "InodeDBList")
+# Each insert writes its own parts: the async insert queue would batch them and time its flushes instead.
+SYNC = {"async_insert": 0}
+
+
+def start_tmpfs_inodedb(run: str) -> tuple[subprocess.Popen, Path]:
+    """An InodeDB on 127.0.0.1:7071 with its SQLite store in /dev/shm, which `stack` then uses."""
+    base = Path("/dev/shm") / f"bighouse-bench-{run}"
+    base.mkdir()
+    (base / "inodedb.toml").write_text(
+        f'listen = "127.0.0.1:7071"\nshallow_idle = false\n\n[storage]\nbackend = "sqlite"\npath = "{base}/db.sqlite"\n')
+    process = subprocess.Popen([str(stack.INODEDB), "--config", str(base / "inodedb.toml"), "--init-key", str(base / "admin.key")],
+                               stdout=open(base / "server.log", "wb"), stderr=subprocess.STDOUT)
+    deadline = time.monotonic() + 30
+    while True:
+        if process.poll() is not None or time.monotonic() > deadline:
+            raise RuntimeError(f"InodeDB on tmpfs did not start; see {base}/server.log")
+        try:
+            if (base / "admin.key").stat().st_size > 0:
+                socket.create_connection(("127.0.0.1", 7071), timeout=1).close()
+                break
+        except OSError:
+            pass
+        time.sleep(0.1)
+    stack.INODEDB_ENDPOINT = "127.0.0.1:7071"
+    stack.INODEDB_ADMIN_KEY = base / "admin.key"
+    return process, base
 
 
 def make_server(run: str) -> stack.Server:
@@ -66,14 +99,14 @@ def bench_inserts(server: stack.Server, disk: str, count: int) -> dict[str, floa
     writes, commits = events(server, WRITES), events(server, ("InodeDBCommit",))
     started = time.monotonic()
     for _ in range(count):
-        server.query(insert)
+        server.query(insert, settings=SYNC)
     result["sequential_inserts_per_s"] = count / (time.monotonic() - started)
     result["writes_per_insert"] = (events(server, WRITES) - writes) / count
     result["commits_per_insert"] = (events(server, ("InodeDBCommit",)) - commits) / count
 
     started = time.monotonic()
     with ThreadPoolExecutor(8) as pool:
-        list(pool.map(lambda _: server.query(insert), range(count)))
+        list(pool.map(lambda _: server.query(insert, settings=SYNC), range(count)))
     result["parallel_inserts_per_s"] = count / (time.monotonic() - started)
 
     assert server.value(f"SELECT count() FROM {table}") == str(2 * count * 1000)
@@ -90,7 +123,7 @@ def fill_parts(server: stack.Server, disk: str, parts: int) -> None:
 
     def insert(start: int) -> None:
         server.query(f"INSERT INTO {table} SELECT number, toString(number) FROM numbers({start}, {min(step, parts - start)})",
-                     settings={"max_partitions_per_insert_block": 0, "throw_on_max_partitions_per_insert_block": 0})
+                     settings={**SYNC, "max_partitions_per_insert_block": 0, "throw_on_max_partitions_per_insert_block": 0})
 
     with ThreadPoolExecutor(16) as pool:
         list(pool.map(insert, range(0, parts, step)))
@@ -124,9 +157,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--inserts", type=int, default=200)
     parser.add_argument("--parts", type=int, default=10_000)
+    parser.add_argument("--tmpfs", action="store_true", help="run InodeDB with its store in /dev/shm")
     args = parser.parse_args()
 
-    server = make_server(uuid.uuid4().hex[:8])
+    run = uuid.uuid4().hex[:8]
+    inodedb = start_tmpfs_inodedb(run) if args.tmpfs else None
+    server = make_server(run)
     server.start()
     results: dict[str, dict[str, float]] = {disk: {} for disk in DISKS}
     try:
@@ -145,8 +181,12 @@ def main() -> int:
     finally:
         server.stop()
         server.wipe()
+        if inodedb:
+            inodedb[0].terminate()
+            inodedb[0].wait(30)
+            shutil.rmtree(inodedb[1])
 
-    out = stack.DEV / "bench/results.json"
+    out = stack.DEV / ("bench/results-tmpfs.json" if args.tmpfs else "bench/results.json")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"inserts": args.inserts, "parts": args.parts, "results": results}, indent=1))
 

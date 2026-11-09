@@ -22,17 +22,19 @@ ROOT = Path(__file__).resolve().parent.parent
 DEV = Path(os.environ.get("BIGHOUSE_DEV_DIR", ROOT / ".dev"))
 CLICKHOUSE = Path(os.environ.get("BIGHOUSE_CLICKHOUSE", ROOT / "build/programs/clickhouse"))
 IDB = Path(os.environ.get("BIGHOUSE_IDB", ROOT / "inodedb/target/release/idb"))
+INODEDB = Path(os.environ.get("BIGHOUSE_INODEDB", ROOT / "inodedb/target/release/inodedb"))
 
 S3_ENDPOINT = "http://127.0.0.1:11111"
 S3_BUCKET = "test"
 S3_ACCESS_KEY = "clickhouse"
 S3_SECRET_KEY = "clickhouse"
 S3_DIR = DEV / "s3" / S3_BUCKET
-INODEDB_ENDPOINT = "127.0.0.1:7070"
+INODEDB_ENDPOINT = os.environ.get("BIGHOUSE_INODEDB_ENDPOINT", "127.0.0.1:7070")
+INODEDB_ADMIN_KEY = Path(os.environ.get("BIGHOUSE_INODEDB_ADMIN_KEY", DEV / "inodedb/admin.key"))
 
 
 def admin_key() -> str:
-    return (DEV / "inodedb/admin.key").read_text().strip()
+    return INODEDB_ADMIN_KEY.read_text().strip()
 
 
 def idb(*args: str, key: str | None = None) -> str:
