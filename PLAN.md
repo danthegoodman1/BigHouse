@@ -41,6 +41,7 @@ Each table has one writer. The demo runs on one machine with s3proxy standing in
 | `src/Disks/DiskObjectStorage/MetadataStorages/IMetadataStorage.h` | `getInlineFileMaxBytes`, default 0. | A metadata storage sets the inline threshold. |
 | `src/Disks/DiskObjectStorage/MetadataStorages/Cache/MetadataStorageFromCacheObjectStorage.{h,cpp}` | Delegates `getInlineFileMaxBytes`. | Inline files under the `cache` wrapper. |
 | `src/Disks/DiskObjectStorage/DiskObjectStorageTransaction.cpp` | `writeFile` inlines up to the larger of the write settings' and the metadata storage's threshold. | Inline files. |
+| `src/Disks/DiskObjectStorage/DiskObjectStorage.h` | `supportZeroCopyReplication` returns false for `InodeDB`. | Zero-copy writes received metadata to local files. |
 | `src/Backups/BackupEntryWithChecksumCalculation.cpp` | A non-empty file without blobs takes its checksum from its bytes. | Backups of inline files. |
 | `src/Common/ProfileEvents.cpp` | `InodeDB*` events. | Call counts in `system.events`. |
 | `src/Disks/tests/gtest_metadata_local_disk.cpp` | Runs every case against `local` and `inodedb`, plus `inodedb`-only inline and spill cases. | Unit parity. |
@@ -48,7 +49,7 @@ Each table has one writer. The demo runs on one machine with s3proxy standing in
 ## Testing Strategy
 
 - **Unit.** `ClickHouse/src/Disks/tests/gtest_metadata_local_disk.cpp` runs every case against both metadata types; the `inodedb` cases need `INODEDB_TEST_ENDPOINT` and `INODEDB_TEST_KEY`.
-- **Parity.** `tests/parity.py` runs ClickHouse's stateless tests in `--s3-storage` mode twice over s3proxy, once with `local` metadata and once with `inodedb`, from one install of the test configs. `inodedb` must pass every test `local` passes; each exception gets a ledger row with its cause.
+- **Parity.** `tests/parity.py` runs ClickHouse's stateless tests in `--s3-storage` mode twice over s3proxy, once with `local` metadata and once with `inodedb`, from one install of the test configs, and reruns each `inodedb` failure on both variants to separate regressions from flaky tests. `inodedb` must pass every test `local` passes; each exception gets a ledger row with its cause.
 - **Features.** `tests/features.py` runs each feature scenario on both metadata types in one server and requires equal answers, then checks restart and blob cleanup.
 - **Crash.** `tests/crash.py` kills the writer with `SIGKILL` under a mixed workload, restarts it, and checks `CHECK TABLE`, acknowledged batches, partial batches and blobs that records name.
 - **Replicas.** `tests/replicas.py`: a writer and a replica; new parts appear, drops vanish, and queries outlive the writer's cleanup.
@@ -87,7 +88,7 @@ Status ledger:
 | Complete | Work | 0E: `scripts/clickhouse-build`, `scripts/inodedb-build` | Builds `build/programs/clickhouse` (RelWithDebInfo, clang, Ninja, ccache; log in `build/build.log`) and `inodedb/target/release/{inodedb,idb}`. |
 | Complete | Work | 0F: `scripts/dev-up`, `scripts/dev-down` | s3proxy `4.1.1` on `127.0.0.1:11111` (bucket `test`, filesystem backend under `.dev/s3`) and InodeDB on `127.0.0.1:7070` (SQLite under `.dev/inodedb`). |
 | Complete | Test | Baseline on `local` metadata | Every `tests/features.py` scenario runs on `s3_local` and matches `s3_inodedb`. |
-| Incomplete | Work | 0G: CI workflow | Missing: `.github/workflows/ci.yml` and a green run. |
+| In Progress | Work | 0G: CI workflow | `.github/workflows/ci.yml` builds InodeDB and ClickHouse with ccache, starts the stack, and runs the gtests, features, fence, replicas, 20 crash rounds and the demo e2e on pull requests; parity runs on manual dispatch. Missing: a green run. |
 | Blocked | Risk | ClickHouse build time in CI | A cold build takes hours on a hosted runner. Blocked by: a choice between a larger or self-hosted runner and a hosted runner with a long first build. |
 | Incomplete | Gate | Baseline runs locally and in CI | Local runs pass; missing: a CI run link. |
 
@@ -151,9 +152,9 @@ Status ledger:
 | Complete | Decision | Records over 64 KiB | A record past `inodedb_spill_threshold` (32 KiB) moves to a blob. Rewriting the record frees the previous spill blob through a tombstone, and removing the file deletes the spill blob after the blobs it names. Gtest `TestSpilledRecord`; the `log_engines` scenario appends past the threshold. |
 | Complete | Test | Parity gtests | 79 passed, 3 skipped (Phase 1 gate). |
 | In Progress | Test | Stateless parity run | `tests/parity.py` runs both variants from one install. Smoke `'^0000[1-9]_'`: 9 OK and 8 skipped on each. Missing: the full run's diff. |
-| Complete | Test | 2G feature checks | `tests/features.py`, with inline files on, passes all 12 scenarios with equal answers on both types: `insert_merge`, `mutations`, `partitions` (`ATTACH PARTITION FROM`, `REPLACE PARTITION`, `MOVE PARTITION TO TABLE`, detached parts), `freeze`, `ttl_projection_index`, `log_engines`, `tables`, `backup`, `cache_and_encryption`, `lightweight_update`, `backup_to_s3` and `move_between_disks`; then restart and blob cleanup. `ReplicatedMergeTree` runs in the parity suite, and `database_disk` in `tests/parity.py --remote-database-disk`. |
+| Complete | Test | 2G feature checks | `tests/features.py`, with inline files on, passes all 13 scenarios with equal answers on both types: `insert_merge`, `mutations`, `partitions` (`ATTACH PARTITION FROM`, `REPLACE PARTITION`, `MOVE PARTITION TO TABLE`, detached parts), `freeze`, `ttl_projection_index`, `log_engines`, `tables`, `backup`, `cache_and_encryption`, `lightweight_update`, `backup_to_s3`, `replicated` (two `ReplicatedMergeTree` replicas over an embedded Keeper) and `move_between_disks`; then restart and blob cleanup. `database_disk` runs in `tests/parity.py --remote-database-disk`. |
 | Incomplete | Test | `database_disk` on the `inodedb` disk | Missing: a `tests/parity.py --remote-database-disk` diff. |
-| Incomplete | Test | Zero-copy replication | Zero-copy keys its locks on blob paths, which inline files lack. Needs: a decision to support it with `inodedb_inline_file_max_bytes = 0` and a test, or to leave it out with upstream's experimental flag. |
+| Complete | Decision | Zero-copy replication | Zero-copy ships each part's local metadata files to the other replica, and the receiver writes them to its local filesystem (`Fetcher::fetchSelectedPart`), so upstream turns it off for `keeper` and `memory` metadata. `DiskObjectStorage::supportZeroCopyReplication` turns it off for `inodedb` too, and replicated tables fetch whole parts; BigHouse's replicas share the writer's tree instead. With it on, the sender failed with `Remote metadata 'checksums.txt' is not exists` and the fetch retried forever; now `tests/features.py replicated` passes with `allow_remote_fs_zero_copy_replication = 1` on both types, and both disks remove every blob afterward. |
 | Incomplete | Gate | No failure unique to `inodedb` | Missing: the full parity diff and its exception rows. |
 
 ## Phase 3: Durability, Fencing and Crash Safety
@@ -270,6 +271,6 @@ Status ledger:
 | Complete | Work | 6B: Slots and fleet configs | `bighouse/fleet.py`: slot `i` uses ports 20000+i, 21000+i and 22000+i. |
 | Complete | Work | 6C: Query API | `bighouse/api.py`: `POST /query?replicas=N` takes slots (503 when none are free), mints a read key, starts the fleet, attaches the writer's tables, runs the query with `enable_parallel_replicas`, stops the fleet, frees the slots, and reports timings in `X-BigHouse-Timings`. |
 | Complete | Decision | Query API language | Python with the standard library only. |
-| Incomplete | Doc | 6D: Walkthrough | Missing: `demo/README.md`. |
+| Complete | Doc | 6D: Walkthrough | `demo/README.md`: starting the writer, loading data, the query API, a query and its headers, what happens per query, `demo/e2e.py`, and stopping. |
 | Complete | Test | Concurrent queries | `demo/e2e.py`: two queries at once take separate slots and both answer. |
 | In Progress | Gate | `demo/e2e.py` matches the writer at 1, 2 and 4 servers | Locally every check passes: a query takes 300 to 420 ms (start 170 to 280 ms, attach 30 to 40 ms, query 30 to 70 ms), and each server of a fleet of 4 reads a share of the marks (1175, 329, 576 and 365). Missing: a CI run. |

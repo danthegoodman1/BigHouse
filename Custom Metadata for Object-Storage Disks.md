@@ -280,7 +280,7 @@ In the Default column, **required** means a pure virtual, **throws** means the d
 | `getStorageObjectsIfExist(path)` | two calls | The blobs, or nothing when the file is absent. |
 | `readFileToString(path)` | throws | Reads a file written with `writeStringToFile`. |
 | `readInlineDataToString(path)` | throws | Reads a file's inline bytes. |
-| `getSerializedMetadata(paths)` | throws | Returns files' serialized records. Zero-copy replication sends a part to another replica this way instead of its data. |
+| `getSerializedMetadata(paths)` | throws | Returns files' serialized records. Zero-copy replication sends a part to another replica this way instead of its data, and the receiver writes them as local metadata files, so an `inodedb` disk turns zero-copy off as `keeper` and `memory` disks do; its replicas share the tree instead. |
 | `refresh(not_sooner_than_ms)` | no-op | Reloads state another server changed, at most that often. Read-only replicas call it before each parts refresh. |
 | `isReadOnly()` | required | True makes the disk read-only; `refresh_parts_interval` requires it on replicas. |
 | `isTransactional()` | false | True when commits can conflict and callers retry through `tryCommit`. |

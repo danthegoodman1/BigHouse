@@ -5,9 +5,13 @@ and once with `inodedb` metadata. Prints the tests that pass on `local` and fail
 Both runs copy one install of ClickHouse's test configs (`tests/config/install.sh --s3-storage --no-azure`) into
 .dev/parity/<variant> and rewrite their absolute paths into that directory. The `inodedb` run gives the `s3` disk, which the `cached_s3`
 cache disk wraps and the default MergeTree policy uses, `inodedb` metadata and blob keys under `parity-inodedb/`. Tests that fail on both,
-for reasons of this machine, cancel out.
+for reasons of this machine, cancel out. A run of one variant compares against the other's last results.
 
-    python3 tests/parity.py [--jobs N] [--variants local,inodedb] [--remote-database-disk] [test-name-regex ...]
+Each test that fails on `inodedb`, and passes or never ran on `local`, runs again with fewer jobs: on `local` first, then
+on `inodedb` if it passed on `local`. A regression fails that `inodedb` recheck too; a test that passes it is flaky.
+`--variants ''` compares and rechecks the last results only.
+
+    python3 tests/parity.py [--jobs N] [--timeout S] [--variants local,inodedb] [--remote-database-disk] [test-name-regex ...]
 
 Needs `scripts/dev-up` (s3proxy serves the `localhost:11111/test` endpoint the test configs use) and Docker, in which
 it starts Azurite.
@@ -97,8 +101,9 @@ def configure(remote_database_disk: bool) -> Path:
     return base / "etc"
 
 
-def install(variant: str, etc: Path) -> Path:
-    base = stack.DEV / "parity" / variant
+def install(variant: str, etc: Path, name: str) -> Path:
+    """Installs `variant` into .dev/parity/<name>."""
+    base = stack.DEV / "parity" / name
     shutil.rmtree(base, ignore_errors=True)
     tools(base)
     shutil.copytree(etc, base / "etc")
@@ -183,7 +188,7 @@ def start(base: Path) -> subprocess.Popen:
     raise RuntimeError(f"the server did not answer; see {base}/log")
 
 
-def run_tests(base: Path, jobs: int, patterns: list[str]) -> dict[str, str]:
+def run_tests(base: Path, jobs: int, timeout: int, patterns: list[str]) -> dict[str, str]:
     bin_dir, env = tools(base)
     env["CLICKHOUSE_CONFIG_CLIENT"] = str(base / "etc/clickhouse-client/config.xml")
     command = [
@@ -193,6 +198,7 @@ def run_tests(base: Path, jobs: int, patterns: list[str]) -> dict[str, str]:
         "--configserver", str(base / "etc/clickhouse-server/config.xml"),
         "--tmp", str(base / "tmp"),
         "--jobs", str(jobs),
+        "--timeout", str(timeout),
         "--no-random-settings", "--no-random-merge-tree-settings", "--no-stateful", "--no-long",
         "--zookeeper", "--shard",
         *patterns,
@@ -209,9 +215,29 @@ def run_tests(base: Path, jobs: int, patterns: list[str]) -> dict[str, str]:
     return results
 
 
+def exactly(tests: list[str]) -> str:
+    """A clickhouse-test selector for exactly these tests; it matches file names."""
+    return "^(?:" + "|".join(re.escape(t) for t in tests) + r")\."
+
+
+def run(variant: str, etc: Path, name: str, jobs: int, timeout: int, patterns: list[str]) -> dict[str, str]:
+    base = install(variant, etc, name)
+    server = start(base)
+    try:
+        results = run_tests(base, jobs, timeout, patterns)
+    finally:
+        server.terminate()
+        server.wait(120)
+    counts = {status: list(results.values()).count(status) for status in sorted(set(results.values()))}
+    print(f"{name}: {counts}", flush=True)
+    return results
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--jobs", type=int, default=16)
+    # The slowest passing test takes about a minute; tests that wait on absent services hang until the timeout.
+    parser.add_argument("--timeout", type=int, default=180, help="seconds per test")
     parser.add_argument("--variants", default="local,inodedb")
     parser.add_argument("--remote-database-disk", action="store_true",
                         help="keep database metadata on an S3 disk: plain_rewritable for local, inodedb for inodedb")
@@ -222,25 +248,29 @@ def main() -> int:
     BINARY.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(stack.CLICKHOUSE, BINARY)
     etc = configure(args.remote_database_disk)
-    for variant in args.variants.split(","):
-        base = install(variant, etc)
-        server = start(base)
-        try:
-            results = run_tests(base, args.jobs, args.patterns)
-        finally:
-            server.terminate()
-            server.wait(120)
-        counts = {status: list(results.values()).count(status) for status in sorted(set(results.values()))}
-        print(f"{variant}: {counts}")
+    for variant in filter(None, args.variants.split(",")):
+        run(variant, etc, variant, args.jobs, args.timeout, args.patterns)
 
+    passed = ("OK", "SKIPPED")
     results = {v: json.loads((stack.DEV / "parity" / v / "results.json").read_text()) for v in ("local", "inodedb")}
-    regressions = sorted(t for t, s in results["local"].items() if s == "OK" and results["inodedb"].get(t) not in ("OK", "SKIPPED"))
-    improvements = sorted(t for t, s in results["inodedb"].items() if s == "OK" and results["local"].get(t) not in ("OK", "SKIPPED"))
+    suspects = sorted(t for t, s in results["inodedb"].items() if s not in passed and results["local"].get(t, "OK") == "OK")
+    improvements = sorted(t for t, s in results["inodedb"].items() if s == "OK" and results["local"].get(t, "OK") not in passed)
+    regressions, flaky, recheck = [], [], {}
+    if suspects:
+        print(f"rechecking {len(suspects)} tests that fail with inodedb metadata", flush=True)
+        jobs = min(args.jobs, 4)
+        local = run("local", etc, "local-recheck", jobs, args.timeout, [exactly(suspects)])
+        if passing := [t for t in suspects if local.get(t) == "OK"]:
+            recheck = run("inodedb", etc, "inodedb-recheck", jobs, args.timeout, [exactly(passing)])
+        regressions = [t for t in passing if recheck.get(t) not in passed]
+        flaky = [t for t in passing if recheck.get(t) in passed]
     print(f"{len(regressions)} tests pass with local metadata and fail with inodedb metadata")
     for test in regressions:
-        print(f"    {test}: {results['inodedb'].get(test, 'missing')}")
+        print(f"    {test}: {recheck.get(test, 'missing')}")
+    print(f"{len(flaky)} tests failed once with inodedb metadata and passed on recheck")
     print(f"{len(improvements)} tests pass with inodedb metadata and fail with local metadata")
-    (stack.DEV / "parity/diff.json").write_text(json.dumps({"regressions": regressions, "improvements": improvements}, indent=1))
+    diff = {"regressions": regressions, "flaky": flaky, "improvements": improvements}
+    (stack.DEV / "parity/diff.json").write_text(json.dumps(diff, indent=1))
     return 1 if regressions else 0
 
 

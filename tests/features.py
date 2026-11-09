@@ -41,7 +41,15 @@ def make_server() -> stack.Server:
         policies=[stack.policy_xml(p, DISKS[p]) for p in POLICIES]
         + [stack.policy_xml(f"{p}_encrypted", f"{DISKS[p]}_encrypted") for p in POLICIES]
         + ["<tiered><volumes><hot><disk>default</disk></hot><cold><disk>s3_inodedb</disk></cold></volumes></tiered>"],
-        extra_config="<backups><allowed_disk>backups_disk</allowed_disk><allowed_path>/</allowed_path></backups>",
+        extra_config=f"""<backups><allowed_disk>backups_disk</allowed_disk><allowed_path>/</allowed_path></backups>
+    <keeper_server>
+        <tcp_port>19181</tcp_port>
+        <server_id>1</server_id>
+        <log_storage_path>{stack.DEV}/servers/features-{run}/coordination/log</log_storage_path>
+        <snapshot_storage_path>{stack.DEV}/servers/features-{run}/coordination/snapshots</snapshot_storage_path>
+        <raft_configuration><server><id>1</id><hostname>127.0.0.1</hostname><port>19234</port></server></raft_configuration>
+    </keeper_server>
+    <zookeeper><node><host>127.0.0.1</host><port>19181</port></node></zookeeper>""",
     )
     server.s3_prefixes = {"s3_local": f"features/{run}/local", "s3_inodedb": f"features/{run}/inodedb"}
     return server
@@ -195,6 +203,26 @@ def scenario_backup_to_s3(s: stack.Server, p: str) -> list[str]:
     s.query("DROP TABLE t SYNC")
     s.query(f"RESTORE TABLE t FROM {target}")
     return [s.query("SELECT count(), sum(k), max(v) FROM t"), s.query("CHECK TABLE t")]
+
+
+def scenario_replicated(s: stack.Server, p: str) -> list[str]:
+    # Two replicas on one server fetch each other's parts over the interserver port. `inodedb` disks fetch whole
+    # parts, since zero-copy replication ships local metadata files.
+    for replica in ("r1", "r2"):
+        s.query(f"""CREATE TABLE t_{replica} (k UInt64, v String)
+            ENGINE = ReplicatedMergeTree('/features/{{database}}/t', '{replica}') ORDER BY k
+            SETTINGS storage_policy = '{p}', allow_remote_fs_zero_copy_replication = 1""")
+    s.query("INSERT INTO t_r1 SELECT number, toString(number) FROM numbers(1000)")
+    s.query("INSERT INTO t_r2 SELECT number + 1000, toString(number) FROM numbers(1000)")
+    s.query("SYSTEM SYNC REPLICA t_r1")
+    s.query("OPTIMIZE TABLE t_r1 FINAL", settings={"alter_sync": 2})
+    s.query("SYSTEM SYNC REPLICA t_r2")
+    out = []
+    for replica in ("r1", "r2"):
+        out += [s.query(f"SELECT count(), sum(k), max(v) FROM t_{replica}"),
+                s.query(f"SELECT name FROM system.parts WHERE table = 't_{replica}' AND active"),
+                s.query(f"CHECK TABLE t_{replica}")]
+    return out
 
 
 def scenario_move_between_disks(s: stack.Server, p: str) -> list[str]:
