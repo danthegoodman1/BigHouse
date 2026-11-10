@@ -198,6 +198,11 @@ def main() -> int:
             for disk in rotated(inserts, round_):
                 samples[disk].append(bench_inserts(server, disk, args.inserts, round_))
                 print(f"{disk}: inserts, round {round_ + 1}: {samples[disk][-1]}", flush=True)
+        # A cold start counts every read the server makes until its table answers, and the server loads every attached
+        # table at once, so the cold starts run with the insert tables detached.
+        for disk in inserts:
+            for round_ in range(args.rounds):
+                server.query(f"DETACH TABLE bench.inserts_{disk}_{round_} PERMANENTLY")
         for disk in DISKS:
             started = time.monotonic()
             fill_parts(server, disk, args.parts)

@@ -161,10 +161,10 @@ const D = {
   ],
   // BENCHMARKS.md, metadata: each panel's bars, by the disks below
   metadata: [
-    ["Cold start, 10,000 parts", "seconds until SELECT count() answers", {local: 2.30, nvme: 1.29, tmpfs: 1.23}, v => v.toFixed(2) + " s"],
-    ["S3 reads at that start", "objects read", {local: 101939, nvme: 1411, tmpfs: 1822}, v => fmt(v)],
-    ["Inserts a second, 1 thread", "one table, one part per insert", {local: 325, local_fsync: 325, nvme: 131, tmpfs: 337, durable: 35}, v => fmt(v)],
-    ["Inserts a second, 8 threads", "one table, one part per insert", {local: 1374, local_fsync: 1356, nvme: 189, tmpfs: 1383, durable: 84}, v => fmt(v)],
+    ["Cold start, 10,000 parts", "seconds until SELECT count() answers", {local: 2.25, nvme: 1.25, tmpfs: 1.21}, v => v.toFixed(2) + " s"],
+    ["S3 reads at that start", "objects read", {local: 100005, nvme: 4, tmpfs: 4}, v => fmt(v)],
+    ["Inserts a second, 1 thread", "one table, one part per insert", {local: 331, local_fsync: 325, nvme: 132, tmpfs: 336, durable: 35}, v => fmt(v)],
+    ["Inserts a second, 8 threads", "one table, one part per insert", {local: 1421, local_fsync: 1416, nvme: 191, tmpfs: 1447, durable: 84}, v => fmt(v)],
   ],
 };
 
