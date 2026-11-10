@@ -1,5 +1,6 @@
 # Builds ClickHouse and InodeDB from the submodules, starts the local stack, and runs BigHouse's suites.
-# A cold ClickHouse build takes hours, so ccache persists between runs. The stateless parity run is opt-in.
+# A cold ClickHouse build takes hours, so ccache persists between runs, even a run whose build ran out of time.
+# The stateless parity run is opt-in.
 name: CI
 
 on:
@@ -41,10 +42,10 @@ jobs:
           wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 21
           sudo apt-get install -y ninja-build ccache fuse3
 
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
         with:
           path: .ccache
-          key: ccache-${{ github.sha }}
+          key: ccache-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: ccache-
 
       - uses: actions/cache@v4
@@ -57,10 +58,20 @@ jobs:
       - name: Build InodeDB
         run: scripts/inodedb-build
 
+      # A cold build can outlast the job. The build stops in time for the next step to save what it compiled, and
+      # the next run resumes from there.
       - name: Build ClickHouse
+        timeout-minutes: 300
         run: |
           scripts/clickhouse-build clickhouse unit_tests_dbms || (tail -100 build/build.log; exit 1)
           ccache --show-stats
+
+      - name: Save the compiler cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: ccache-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Start s3proxy and InodeDB
         run: scripts/dev-up
