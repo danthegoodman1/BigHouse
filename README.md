@@ -1,7 +1,5 @@
 # BigHouse
 
-[![CI](https://github.com/danthegoodman1/BigHouse/actions/workflows/ci.yml/badge.svg)](https://github.com/danthegoodman1/BigHouse/actions/workflows/ci.yml)
-
 BigHouse runs ClickHouse like BigQuery. One writer ingests into `MergeTree` tables on S3, and each query runs on a fleet of ClickHouse servers that read those tables as parallel replicas, answer, and make way for fresh ones. It rests on `inodedb`, a new `metadata_type` for ClickHouse's object-storage disks that keeps the disk's file tree in [InodeDB](https://github.com/danthegoodman1/inodedb), a transactional tree of inodes, and its blobs in S3. Any number of servers read the disk while its writer changes it, and a fleet needs nothing from the writer, so queries keep answering while it is down. The disk's code lives on the `bighouse` branch of a [fork of ClickHouse 26.10](https://github.com/danthegoodman1/ClickHouse/tree/bighouse), which this repo pins as its `ClickHouse/` submodule, and a Python service with no dependencies runs the fleets.
 
 The disk matches an S3 disk with `local` metadata feature for feature. Of ClickHouse's 17,275 stateless tests, the five that fail only on `inodedb` read local metadata files, and pass once pointed at InodeDB's tree. Small files live in InodeDB, so 10,000 parts load in 1.27 s from 2,449 S3 reads, where `local` takes 2.33 s and 107,141 reads. A query that turns eight blank servers into the tenant's replicas and runs on them answers in 138 ms. [BENCHMARKS.md](BENCHMARKS.md) has every result and the commands to reproduce them.
@@ -100,7 +98,7 @@ demo/load                         # 20 million rows into demo.events
 python3 -m bighouse.api           # the query API on http://127.0.0.1:8080, with 16 warm slots
 ```
 
-`scripts/clickhouse-build` needs clang 21, CMake, Ninja and ccache, `scripts/inodedb-build` needs Rust and `protoc` (`apt-get install protobuf-compiler`), and `demo/up` needs Docker and Python 3.11 or later. Then ask a fleet of four:
+`scripts/clickhouse-build` needs clang 21, CMake, Ninja, NASM and ccache, `scripts/inodedb-build` needs Rust and `protoc` (`apt-get install protobuf-compiler`), and `demo/up` needs Docker and Python 3.11 or later. Then ask a fleet of four:
 
 ```console
 $ curl -s -D - 'http://127.0.0.1:8080/query?replicas=4' \
@@ -196,8 +194,6 @@ scripts/dev-down                                  # scripts/dev-down --wipe also
 | `scripts/` | `clickhouse-build`, `inodedb-build`, `dev-up`, `dev-down` |
 
 [PLAN.md](PLAN.md#clickhouse-files-changed) names every change to ClickHouse's own files and its reason.
-
-CI runs on every pull request: it builds InodeDB and ClickHouse with a restored ccache, starts s3proxy and InodeDB, and runs the unit tests, the features, fence, replica, discovery, crash (20 rounds) and claims suites, and the demo end to end. A manual run can add the stateless parity run.
 
 ## License
 

@@ -29,7 +29,7 @@ Each table has one writer. The demo runs on one machine with s3proxy standing in
 - **InodeDB owns tree semantics.** The disk maps ClickHouse files onto inodes and values. When InodeDB lacks a capability, build it in `inodedb/` under that project's plan and tests.
 - **One fenced batch per transaction.** Each metadata transaction commits as one `all_or_nothing` InodeDB batch carrying the writer's owner fence.
 - **Blobs outlive every reader.** A blob leaves S3 only after the commit that frees it, and only once no reader lease can reach it.
-- **Everything runs locally.** s3proxy serves S3, an InodeDB server holds metadata, and ClickHouse comes from the submodule. Tests, CI and the demo use the same stack.
+- **Everything runs locally.** s3proxy serves S3, an InodeDB server holds metadata, and ClickHouse comes from the submodule. Tests and the demo use the same stack.
 
 ## ClickHouse Files Changed
 
@@ -58,7 +58,7 @@ Each table has one writer. The demo runs on one machine with s3proxy standing in
 - **Replicas.** `tests/replicas.py`: a writer and a replica; new parts appear, drops vanish, and queries outlive the writer's cleanup.
 - **End to end.** `demo/e2e.py`: the query API returns the writer's answers at fleet sizes 1, 2, 4 and 8, and replaces each fleet's servers with blank ones.
 - **Benchmarks.** `tests/bench.py` against `local` metadata, with InodeDB's store on the drive and on tmpfs (`--tmpfs`), and `demo/bench` for the query API at each fleet size, recorded in `BENCHMARKS.md`.
-- **CI.** GitHub Actions runs s3proxy and InodeDB, builds ClickHouse with a restored ccache, and runs the suites. The full stateless parity run runs on demand.
+- **CI.** GitHub Actions will download prebuilt ClickHouse binaries for the pinned fork commit, run s3proxy and InodeDB, and run the suites, with the full stateless parity run on demand. A hosted runner takes hours to build ClickHouse, so CI waits for those binaries.
 
 ## Phase 0: Foundations
 
@@ -90,8 +90,8 @@ Status ledger:
 | Complete | Work | 0E: `scripts/clickhouse-build`, `scripts/inodedb-build` | Builds `build/programs/clickhouse` (RelWithDebInfo, clang, Ninja, ccache; log in `build/build.log`) and `inodedb/target/release/{inodedb,idb}`. |
 | Complete | Work | 0F: `scripts/dev-up`, `scripts/dev-down` | s3proxy `4.1.1` on `127.0.0.1:11111` (bucket `test`, filesystem backend under `.dev/s3`) and InodeDB on `127.0.0.1:7070` (SQLite under `.dev/inodedb`). |
 | Complete | Test | Baseline on `local` metadata | Every `tests/features.py` scenario runs on `s3_local` and matches `s3_inodedb`. |
-| In Progress | Work | 0G: CI workflow | `.github/workflows/ci.yml` builds InodeDB and ClickHouse with ccache, starts the stack, and runs the gtests, features, fence, replicas, 20 crash rounds and the demo e2e on pull requests; parity runs on manual dispatch. Missing: a green run. |
-| Blocked | Risk | ClickHouse build time in CI | A cold build takes hours on a hosted runner. Blocked by: a choice between a larger or self-hosted runner and a hosted runner with a long first build. |
+| Incomplete | Work | 0G: CI workflow | A workflow that built ClickHouse on a hosted runner, removed until CI can download the binaries, passed `Build InodeDB` once it installed `protoc`, and stopped at ClickHouse's configure, which needs NASM. Missing: a workflow that downloads prebuilt ClickHouse binaries, installs `protoc`, starts the stack and runs the gtests, features, fence, replicas, discovery, crash, claims and e2e suites on pull requests, with parity on manual dispatch; and a green run. |
+| Blocked | Risk | ClickHouse build time in CI | A cold build takes hours on a hosted runner, and a warm ccache still hashes every file and links two binaries on 4 cores. The binaries depend only on the fork commit: stripped and compressed with zstd, the server is 150 MB, so CI can download them per commit. Blocked by: a choice of where they are built, on a developer's machine when the submodule moves or by a workflow on the fork. |
 | Incomplete | Gate | Baseline runs locally and in CI | Local runs pass; missing: a CI run link. |
 
 ## Phase 1: InodeDB Client in ClickHouse
