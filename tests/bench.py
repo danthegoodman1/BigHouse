@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Benchmarks `inodedb` metadata against `local` metadata on one server over s3proxy.
 
-Three disks take the same work: `local` metadata, `inodedb` metadata, and `inodedb` with inline files off.
+Three disks take the same work: `local` metadata, `inodedb` metadata, and `inodedb` with inline files off. The
+inserts also run on the server's own drive with every file and directory synced (`default`, fsync on): what a durable
+insert costs there. `local` metadata on an object-storage disk makes no fsync, whatever MergeTree's fsync settings say.
 
 - Inserts: small inserts one after another, then the same number from 8 threads, with merges stopped. Reports
-  inserts per second, and object-storage writes and InodeDB commits per insert.
+  inserts per second, and object-storage writes, InodeDB commits and fsyncs per insert.
 - Cold start: a table of many parts on each disk in turn. Restarts the server with only that table attached and
   reports the seconds until the table answers, and object-storage and InodeDB reads during the load.
 
@@ -35,9 +37,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from bighouse import stack  # noqa: E402
 
 DISKS = ("local", "inodedb", "inodedb_blobs")
+# The inserts' extra row: MergeTree on the server's own drive, syncing every file and directory it writes.
+DURABLE = "default_fsync"
+DURABLE_SETTINGS = "storage_policy = 'default', fsync_after_insert = 1, fsync_part_directory = 1"
 WRITES = ("DiskS3PutObject", "DiskS3CreateMultipartUpload", "DiskS3UploadPart")
 READS = ("DiskS3GetObject", "DiskS3HeadObject")
 INODEDB_READS = ("InodeDBStat", "InodeDBRead", "InodeDBList")
+SYNCS = ("FileSync", "DirectorySync")
 # Each insert writes its own parts: the async insert queue would batch them and time its flushes instead.
 SYNC = {"async_insert": 0}
 
@@ -90,19 +96,21 @@ def events(server: stack.Server, names: tuple[str, ...]) -> int:
 
 def bench_inserts(server: stack.Server, disk: str, count: int) -> dict[str, float]:
     table = f"bench.inserts_{disk}"
+    placement = DURABLE_SETTINGS if disk == DURABLE else f"storage_policy = '{disk}'"
     server.query(f"CREATE TABLE {table} (k UInt64, v String, t DateTime) ENGINE = MergeTree ORDER BY k "
-                 f"SETTINGS storage_policy = '{disk}', parts_to_throw_insert = 100000, parts_to_delay_insert = 100000")
+                 f"SETTINGS {placement}, parts_to_throw_insert = 100000, parts_to_delay_insert = 100000")
     server.query(f"SYSTEM STOP MERGES {table}")
     insert = f"INSERT INTO {table} SELECT number, toString(number), now() FROM numbers(1000)"
     result = {}
 
-    writes, commits = events(server, WRITES), events(server, ("InodeDBCommit",))
+    writes, commits, syncs = events(server, WRITES), events(server, ("InodeDBCommit",)), events(server, SYNCS)
     started = time.monotonic()
     for _ in range(count):
         server.query(insert, settings=SYNC)
     result["sequential_inserts_per_s"] = count / (time.monotonic() - started)
     result["writes_per_insert"] = (events(server, WRITES) - writes) / count
     result["commits_per_insert"] = (events(server, ("InodeDBCommit",)) - commits) / count
+    result["fsyncs_per_insert"] = (events(server, SYNCS) - syncs) / count
 
     started = time.monotonic()
     with ThreadPoolExecutor(8) as pool:
@@ -164,10 +172,10 @@ def main() -> int:
     inodedb = start_tmpfs_inodedb(run) if args.tmpfs else None
     server = make_server(run)
     server.start()
-    results: dict[str, dict[str, float]] = {disk: {} for disk in DISKS}
+    results: dict[str, dict[str, float]] = {disk: {} for disk in (*DISKS, DURABLE)}
     try:
         server.query("CREATE DATABASE bench")
-        for disk in DISKS:
+        for disk in (*DISKS, DURABLE):
             results[disk] |= bench_inserts(server, disk, args.inserts)
             print(f"{disk}: inserts {results[disk]}", flush=True)
         for disk in DISKS:
@@ -191,13 +199,15 @@ def main() -> int:
     out.write_text(json.dumps({"inserts": args.inserts, "parts": args.parts, "results": results}, indent=1))
 
     print(f"\n| Metadata | Inserts/s, 1 thread | Inserts/s, 8 threads | S3 writes per insert | InodeDB commits per insert "
-          f"| {args.parts:,} parts written (s) | Cold start (s) | S3 reads at load | InodeDB reads at load |")
-    print("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
-    for disk in DISKS:
+          f"| fsyncs per insert | {args.parts:,} parts written (s) | Cold start (s) | S3 reads at load | InodeDB reads at load |")
+    print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    for disk in (*DISKS, DURABLE):
         r = results[disk]
-        print(f"| `{disk}` | {r['sequential_inserts_per_s']:.0f} | {r['parallel_inserts_per_s']:.0f} | {r['writes_per_insert']:.1f} "
-              f"| {r['commits_per_insert']:.1f} | {r['fill_parts_s']:.1f} | {r['cold_start_s']:.2f} | {r['reads_during_load']:,} "
-              f"| {r['inodedb_reads_during_load']:,} |")
+        name = "`default`, fsync on" if disk == DURABLE else f"`{disk}`"
+        rest = (f"{r['fill_parts_s']:.1f} | {r['cold_start_s']:.2f} | {r['reads_during_load']:,} | {r['inodedb_reads_during_load']:,}"
+                if disk in DISKS else "| | |")
+        print(f"| {name} | {r['sequential_inserts_per_s']:.0f} | {r['parallel_inserts_per_s']:.0f} | {r['writes_per_insert']:.1f} "
+              f"| {r['commits_per_insert']:.1f} | {r['fsyncs_per_insert']:.1f} | {rest} |")
     return 0
 
 

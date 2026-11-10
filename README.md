@@ -2,7 +2,7 @@
 
 BigHouse runs ClickHouse like BigQuery. One writer ingests into `MergeTree` tables on S3, and each query runs on a fleet of ClickHouse servers that read those tables as parallel replicas, answer, and make way for fresh ones. It rests on `inodedb`, a new `metadata_type` for ClickHouse's object-storage disks that keeps the disk's file tree in [InodeDB](https://github.com/danthegoodman1/inodedb), a transactional tree of inodes, and its blobs in S3. Any number of servers read the disk while its writer changes it, and a fleet needs nothing from the writer, so queries keep answering while it is down. The disk's code lives on the `bighouse` branch of a [fork of ClickHouse 26.10](https://github.com/danthegoodman1/ClickHouse/tree/bighouse), which this repo pins as its `ClickHouse/` submodule, and a Python service with no dependencies runs the fleets.
 
-The disk matches an S3 disk with `local` metadata feature for feature. Of ClickHouse's 17,275 stateless tests, the five that fail only on `inodedb` read local metadata files, and pass once pointed at InodeDB's tree. Small files live in InodeDB, so 10,000 parts load in 1.27 s from 2,449 S3 reads, where `local` takes 2.33 s and 107,141 reads. A query that turns eight blank servers into the tenant's replicas and runs on them answers in 138 ms. [BENCHMARKS.md](BENCHMARKS.md) has every result and the commands to reproduce them.
+The disk matches an S3 disk with `local` metadata feature for feature. Of ClickHouse's 17,275 stateless tests, the five that fail only on `inodedb` read local metadata files, and pass once pointed at InodeDB's tree. Small files live in InodeDB, so 10,000 parts load in 1.30 s from 1,847 S3 reads, where `local` takes 2.44 s and 106,895 reads. A query that turns eight blank servers into the tenant's replicas and runs on them answers in 138 ms. [BENCHMARKS.md](BENCHMARKS.md) has every result and the commands to reproduce them.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/fleet-dark.png">
@@ -17,7 +17,7 @@ The disk matches an S3 disk with `local` metadata feature for feature. Of ClickH
 
 **Real renames and hardlinks.** A directory on the disk is an InodeDB directory, so renaming a part rewrites one entry, and a hardlink is a second entry naming the same inode. Mutations, `ATTACH PARTITION FROM` and `FREEZE` change only metadata.
 
-**One fenced commit per transaction.** Each metadata transaction commits as one all-or-nothing InodeDB batch: an insert writes its part's files in one, and renames the part to its final name in a second. A starting writer takes the disk by writing its `owner` file and fences every batch on that file's version, so once a second writer starts, the first commits nothing more. A retried batch carries its first request id, so it applies once.
+**One fenced commit per transaction.** Each metadata transaction commits as one all-or-nothing InodeDB batch, and an insert commits once: its part's files and the part's rename to its final name go in the same batch. A starting writer takes the disk by writing its `owner` file and fences every batch on that file's version, so once a second writer starts, the first commits nothing more. A retried batch carries its first request id, so it applies once.
 
 **Readers that share the writer's tree.** A read-only server attaches the writer's tables from InodeDB and sees new parts, merges, drops and truncation on refresh, with no copy of the metadata and no part fetches. Parallel replicas read the parts their coordinator lists, so a fleet answers from one state while the writer inserts and merges.
 
@@ -52,27 +52,28 @@ The disk against `local` metadata, one of each on the same server and s3proxy:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/metadata-dark.png">
-  <img src="docs/images/metadata-light.png" alt="local metadata, inodedb with InodeDB on the NVMe drive, and inodedb with InodeDB on tmpfs. Cold start of 10,000 parts: 2.33 s, 1.27 s and 1.20 s. S3 reads at that start: 107,141, 2,449 and 1,672. Inserts a second on one thread: 312, 83 and 318. Inserts a second on eight threads: 1,269, 145 and 2,182.">
+  <img src="docs/images/metadata-light.png" alt="local metadata, inodedb with InodeDB on the NVMe drive, and inodedb with InodeDB on tmpfs. Cold start of 10,000 parts: 2.44 s, 1.30 s and 1.23 s. S3 reads at that start: 106,895, 1,847 and 1,885. Inserts a second on one thread: 319, 133 and 336, and 35 on the server's own drive with every file synced. Inserts a second on eight threads: 1,149, 193 and 1,450, and 84 on the drive with every file synced.">
 </picture>
 
-| | `local` | `inodedb`, store on NVMe | `inodedb`, store on tmpfs |
-|---|--:|--:|--:|
-| Inserts a second, 1 thread | 312 | 83 | 318 |
-| Inserts a second, 8 threads | 1,269 | 145 | 2,182 |
-| 10,000 parts written | 5.5 s | 87.1 s | 4.8 s |
-| Cold start, 10,000 parts | 2.33 s | 1.27 s | 1.20 s |
-| S3 reads at that start | 107,141 | 2,449 | 1,672 |
+| | `local` | `inodedb`, store on NVMe | `inodedb`, store on tmpfs | The drive, fsync on |
+|---|--:|--:|--:|--:|
+| Inserts a second, 1 thread | 319 | 133 | 336 | 35 |
+| Inserts a second, 8 threads | 1,149 | 193 | 1,450 | 84 |
+| 10,000 parts written | 5.6 s | 50.3 s | 5.7 s | |
+| Cold start, 10,000 parts | 2.44 s | 1.30 s | 1.23 s | |
+| S3 reads at that start | 106,895 | 1,847 | 1,885 | |
 
-An insert makes two InodeDB commits, each waiting for the store's sync, and one table renames its new parts one at a time, so on a drive whose sync takes 2 ms a table takes about 145 inserts a second however many threads insert. `local` metadata syncs none of its files by default. With syncs that take microseconds, as on datacenter NVMe with power-loss protection, `inodedb` keeps pace with `local` on one thread and outpaces it on eight. tmpfs stands in for such a drive here.
+An `inodedb` insert is durable when it returns: it makes one InodeDB commit, which waits for the store's sync. `local` metadata syncs nothing, and on an object-storage disk `fsync_after_insert` and `fsync_part_directory` leave it so. The last column is MergeTree on the server's own drive with both on: 14 fsyncs per insert. One table commits its new parts one at a time, so on a drive whose sync takes 2 ms a table takes about 190 inserts a second however many threads insert. With syncs that take microseconds, as on datacenter NVMe with power-loss protection, `inodedb` passes `local` on one thread and on eight. tmpfs stands in for such a drive here.
 
 ### Trade-offs
 
-- **Insert rate on slow syncs.** On this drive one table takes 83 inserts a second on one thread, against `local`'s 312, and 10,000 parts take 87 s against 5.5 s. Larger inserts, or `async_insert`, write fewer parts.
+- **Insert rate on slow syncs.** On this drive one table takes 133 durable inserts a second on one thread, against `local`'s 319 unsynced ones, and 10,000 parts take 50 s against 5.6 s. Larger inserts, or `async_insert`, write fewer parts.
+- **One table's inserts commit in turn.** Each part commits under the table's parts lock, which orders a table's new parts. With fast syncs, the part's batch sets the pace: on tmpfs, 8 threads insert 1,450 times a second against 336 on one.
 - **One writer per disk.** Every write goes through one ClickHouse server, and the writer that starts last owns the disk.
 - **One query per fleet server.** A config reload can add a disk but cannot remove one or change its key, so each server serves one query and is then replaced. Back to back on 8 slots, fleets of 4 average 276 ms a query against 126 ms with the pool settled, because each waits for servers still booting.
 - **Schema changes reach the next fleet.** Each fleet reads the schema as it attaches. A long-lived replica keeps the schema it attached with.
 - **Databases a fleet leaves out.** A fleet serves tables whose data lies on the disk, so it leaves out databases with `Memory` tables, tables on other disks, or refreshable materialized views, and names them in the response.
-- **Uncommitted blobs.** Blobs a writer uploaded but never committed, before a crash or a takeover, stay in S3, as with `local` metadata.
+- **Uncommitted blobs.** A writer that crashes or loses the disk leaves in S3 the blobs of parts it had not committed, a part waiting for the table's lock among them. `local` metadata leaves those of parts still being written.
 - **Whole-part replication.** Zero-copy replication ships local metadata files between replicas, so `inodedb` turns it off, and `ReplicatedMergeTree` replicas on it fetch whole parts. BigHouse's own replicas read the writer's tree instead.
 - **One machine so far.** Every part of the demo runs on one host. [PRODUCTION.md](PRODUCTION.md) describes how each runs on its own.
 

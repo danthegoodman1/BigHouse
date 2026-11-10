@@ -45,4 +45,4 @@ A workflow that resumes after a crash runs step 6 for the servers and key it rec
 
 - **One prefix per disk.** Fleet servers get read-only credentials scoped to it. Session credentials expire like the key (`<session_token>` on the disk).
 - **A lifecycle rule with `AbortIncompleteMultipartUpload`.** ClickHouse uploads large blobs in parts, and a crash mid-upload leaves parts that no listing shows.
-- **Uncommitted blobs.** BigHouse deletes only blobs that a commit freed. Blobs a writer uploaded but never committed, before a crash or a takeover, stay in S3, as with `local` metadata.
+- **Uncommitted blobs.** BigHouse deletes only blobs that a commit freed. A writer that crashes or loses the disk leaves in S3 the blobs of parts it had not committed, a part waiting for the table's lock among them. `local` metadata leaves those of parts still being written.
