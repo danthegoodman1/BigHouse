@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BigHouse charts</title>
+<!-- Source of the README charts. render.sh screenshots each chart in light and dark. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..100,500..800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+:root {
+  --bg: #f3f4f2;
+  --surface: #fcfcfb;
+  --ink: #101315;
+  --ink-2: #4a5056;
+  --muted: #7f858a;
+  --grid: #e3e5e2;
+  --axis: #c3c7c3;
+  --ring: rgba(16, 19, 21, 0.10);
+  --assign: #2a78d6;
+  --attach: #eb6834;
+  --query: #1baf7a;
+  --other: #b9bdc0;
+  --local: #9a9fa3;
+  --nvme: #2a78d6;
+  --tmpfs: #1baf7a;
+  --font-display: "Archivo", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1012; --surface: #15181a; --ink: #eef0ef; --ink-2: #b8bec2; --muted: #868c91;
+    --grid: #25292c; --axis: #3a3f43; --ring: rgba(255, 255, 255, 0.10);
+    --assign: #3987e5; --attach: #d95926; --query: #199e70; --other: #4a5054;
+    --local: #6c7277; --nvme: #3987e5; --tmpfs: #199e70;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1012; --surface: #15181a; --ink: #eef0ef; --ink-2: #b8bec2; --muted: #868c91;
+  --grid: #25292c; --axis: #3a3f43; --ring: rgba(255, 255, 255, 0.10);
+  --assign: #3987e5; --attach: #d95926; --query: #199e70; --other: #4a5054;
+  --local: #6c7277; --nvme: #3987e5; --tmpfs: #199e70;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font-family: var(--font-body); font-size: 16px; line-height: 1.55;
+  padding: 32px 16px 64px;
+}
+.wrap { max-width: 1040px; margin: 0 auto; display: flex; flex-direction: column; gap: 48px; }
+h1, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
+h3 { font-size: 1.05rem; font-weight: 650; }
+.card { background: var(--surface); border: 1px solid var(--ring); border-radius: 14px; }
+.key { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 0.82rem; color: var(--ink-2); }
+.key span { display: inline-flex; align-items: center; gap: 7px; }
+.sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.foot { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px 24px; font-size: 0.8rem; color: var(--muted); }
+
+.hero { padding: 40px; display: flex; flex-direction: column; gap: 22px; }
+.hero-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-end; gap: 12px 32px; }
+.hero h1 { font-size: 3.1rem; font-weight: 780; font-stretch: 80%; line-height: 1.02; letter-spacing: -0.015em; max-width: 20ch; }
+.hero h1 em { font-style: normal; color: var(--assign); }
+.hero-meta { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--ink-2); }
+.hero-meta b { color: var(--ink); font-weight: 600; }
+.hero .foot { border-top: 1px solid var(--grid); padding-top: 14px; }
+.colhead { font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); padding-bottom: 4px; border-bottom: 1px solid var(--grid); }
+.axis { position: relative; height: 22px; border-top: 1px solid var(--axis); }
+.axis span { position: absolute; top: 4px; transform: translateX(-50%); font-family: var(--font-mono); font-size: 0.72rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.axis-cap { font-size: 0.76rem; color: var(--muted); }
+.gl { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--grid); }
+.gl.zero { background: var(--axis); }
+.v { margin-left: 6px; padding: 1px 4px; background: var(--surface); position: relative; font-family: var(--font-mono); font-size: 0.8rem; line-height: 1; color: var(--ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.v.lead { color: var(--ink); font-weight: 600; }
+
+/* A query's time by fleet size: one stacked bar per size, a segment per step, on a linear axis */
+.fleet { display: grid; grid-template-columns: 8rem minmax(0, 1fr); column-gap: 18px; }
+.fleet .axis, .fleet .axis-cap { grid-column: 2; }
+.fleet .row-label { padding: 14px 0; align-self: center; font-weight: 600; font-size: 0.95rem; }
+.fleet .track { position: relative; padding: 14px 0; display: flex; align-items: center; }
+.stack { display: flex; height: 26px; flex: none; position: relative; }
+.stack i { display: block; height: 100%; border-right: 2px solid var(--surface); }
+.stack i:last-child { border-right: 0; border-radius: 0 5px 5px 0; }
+
+/* Metadata against local: a panel per measure, a bar per disk, each panel on its own linear scale */
+.meta-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px 40px; }
+.panel { display: flex; flex-direction: column; gap: 8px; }
+.panel .sub { font-size: 0.8rem; color: var(--muted); margin-top: -6px; }
+.bars { display: grid; grid-template-columns: 9.5rem minmax(0, 1fr); column-gap: 12px; row-gap: 6px; }
+.bars .name { font-size: 0.82rem; color: var(--ink-2); align-self: center; line-height: 1.2; }
+.bars .b { display: flex; align-items: center; height: 18px; }
+.bars .bar { height: 18px; border-radius: 0 4px 4px 0; flex: none; min-width: 2px; }
+
+/* Capture mode, set by a URL hash such as #fleet-dark: one chart at 2x on GitHub's page color */
+html.capture { zoom: 2; }
+html.capture body { padding-block: 24px; }
+html.capture[data-theme="light"] { --bg: #ffffff; }
+html.capture[data-theme="dark"] { --bg: #0d1117; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="card hero" id="fleet">
+    <div class="hero-head">
+      <h1>Eight blank ClickHouse servers become the tenant's replicas and answer in <em>138 ms</em></h1>
+      <div class="hero-meta">
+        <span><b>Query API</b> · <code>SELECT count(), sum(duration_ms)</code> over 20M rows</span>
+        <span>The pool settled between queries · median of 10 runs</span>
+        <span>One Intel Core Ultra 9 285 · s3proxy · InodeDB on SQLite</span>
+      </div>
+    </div>
+    <div class="fleet" id="fleet-chart" role="img"></div>
+    <div class="foot">
+      <div class="key">
+        <span><i class="sw" style="background:var(--assign)"></i>Assign: tenant config and reload</span>
+        <span><i class="sw" style="background:var(--attach)"></i>Attach the tables from InodeDB</span>
+        <span><i class="sw" style="background:var(--query)"></i>Query with parallel replicas</span>
+        <span><i class="sw" style="background:var(--other)"></i>Mint the key, take the servers</span>
+      </div>
+      <span>Every server shares the one machine's cores.</span>
+    </div>
+  </div>
+
+  <div class="card hero" id="metadata">
+    <div class="hero-head">
+      <h1>10,000 parts start <em>1.8× as fast</em> as on local metadata, and the store's sync sets the insert rate</h1>
+      <div class="hero-meta">
+        <span><b>tests/bench.py</b> · one server, a disk of each kind</span>
+        <span>1,000-row inserts, merges stopped · 10,000 one-row partitions</span>
+        <span>Intel Core Ultra 9 285 · NVMe with a 2 ms <code>fdatasync</code></span>
+      </div>
+    </div>
+    <div class="meta-grid" id="metadata-chart" role="img"></div>
+    <div class="foot">
+      <div class="key">
+        <span><i class="sw" style="background:var(--local)"></i>local</span>
+        <span><i class="sw" style="background:var(--nvme)"></i>inodedb, InodeDB on the NVMe drive</span>
+        <span><i class="sw" style="background:var(--tmpfs)"></i>inodedb, InodeDB on tmpfs</span>
+      </div>
+      <span>local's figures come from the run with InodeDB on the drive.</span>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const D = {
+  // BENCHMARKS.md, Fleets: median ms of assign, attach and query, and the median total, by fleet size
+  fleet: [
+    [1, 13, 22, 49, 98],
+    [2, 14, 37, 52, 115],
+    [4, 15, 45, 53, 126],
+    [8, 18, 49, 58, 138],
+  ],
+  // BENCHMARKS.md, metadata: local, inodedb on the drive, inodedb on tmpfs
+  metadata: [
+    ["Cold start, 10,000 parts", "seconds until SELECT count() answers", [2.33, 1.27, 1.20], v => v.toFixed(2) + " s"],
+    ["S3 reads at that start", "objects read", [107141, 2449, 1672], v => fmt(v)],
+    ["Inserts a second, 1 thread", "one table, one part per insert", [312, 83, 318], v => fmt(v)],
+    ["Inserts a second, 8 threads", "one table, one part per insert", [1269, 145, 2182], v => fmt(v)],
+  ],
+};
+
+const [view, theme] = location.hash.slice(1).split("-");
+if (theme) document.documentElement.dataset.theme = theme;
+if (view) {
+  document.documentElement.classList.add("capture");
+  for (const c of document.querySelector(".wrap").children) c.hidden = c.id !== view;
+}
+
+const fmt = n => n.toLocaleString("en-US");
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+
+(function fleet() {
+  const host = document.getElementById("fleet-chart");
+  const MAX = 160, ticks = [0, 40, 80, 120, 160];
+  const pos = v => (v / MAX) * 100;
+  host.append(el("div", "colhead", "Fleet"), el("div", "colhead", "Milliseconds from request to answer"));
+  for (const [size, assign, attach, query, total] of D.fleet) {
+    const track = el("div", "track");
+    for (const t of ticks) { const g = el("i", t ? "gl" : "gl zero"); g.style.left = pos(t) + "%"; track.append(g); }
+    const stack = el("div", "stack");
+    for (const [v, color] of [[assign, "assign"], [attach, "attach"], [query, "query"], [total - assign - attach - query, "other"]]) {
+      // Each segment's share of the stack, which spans the total.
+      const seg = el("i"); seg.style.width = (v / total) * 100 + "%"; seg.style.background = `var(--${color})`;
+      stack.append(seg);
+    }
+    stack.style.width = pos(total) + "%";
+    track.append(stack, el("span", size === 8 ? "v lead" : "v", total + " ms"));
+    host.append(el("div", "row-label", size === 1 ? "1 server" : `${size} servers`), track);
+  }
+  const axis = el("div", "axis");
+  for (const t of ticks) { const s = el("span", null, t); s.style.left = pos(t) + "%"; axis.append(s); }
+  host.append(axis, el("div", "axis-cap", "Milliseconds, the pool settled between queries"));
+  host.setAttribute("aria-label", "Milliseconds for a query through the BigHouse API by fleet size, as assign, attach, query and total: " +
+    D.fleet.map(([n, a, b, c, t]) => `${n} ${n === 1 ? "server" : "servers"} ${a}, ${b}, ${c} and ${t}`).join("; ") + ".");
+})();
+
+(function metadata() {
+  const host = document.getElementById("metadata-chart");
+  const disks = [["local", "local"], ["nvme", "inodedb, NVMe"], ["tmpfs", "inodedb, tmpfs"]];
+  for (const [title, sub, values, show] of D.metadata) {
+    const panel = el("div", "panel"), bars = el("div", "bars"), max = Math.max(...values);
+    panel.append(el("h3", null, title), el("div", "sub", sub));
+    values.forEach((v, i) => {
+      const b = el("div", "b"), bar = el("span", "bar");
+      bar.style.width = (v / max) * 72 + "%"; bar.style.background = `var(--${disks[i][0]})`;
+      b.append(bar, el("span", i ? "v lead" : "v", show(v)));
+      bars.append(el("div", "name", disks[i][1]), b);
+    });
+    panel.append(bars); host.append(panel);
+  }
+  host.setAttribute("aria-label", "local metadata, inodedb with InodeDB on the NVMe drive, and inodedb with InodeDB on tmpfs: " +
+    D.metadata.map(([t, , v, show]) => `${t} ${v.map(show).join(", ")}`).join("; ") + ".");
+})();
+</script>
+</body>
+</html>

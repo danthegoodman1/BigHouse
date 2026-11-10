@@ -1,10 +1,6 @@
 # Benchmarks
 
-`tests/bench.py` gives one server three disks over the same s3proxy and runs the same work on each: `local` metadata, `inodedb` metadata, and `inodedb` with inline files off (`inodedb_blobs`).
-
-- **Inserts.** 200 inserts of 1,000 rows one after another, then 200 more from 8 threads, into a table with merges stopped. Inserts are synchronous (`async_insert = 0`), so each writes its own part.
-- **10,000 parts.** 16 inserts at once write a table of 10,000 one-row partitions.
-- **Cold start.** The server restarts with only that table attached; the time runs until `SELECT count()` answers.
+Two benchmarks ran on the machine below: `demo/bench` times queries through the query API at each fleet size, and `tests/bench.py` compares `inodedb` metadata with `local`.
 
 ## Machine
 
@@ -13,7 +9,33 @@
 - s3proxy 4.1.1 in Docker, on the filesystem backend on that drive. InodeDB on SQLite.
 - ClickHouse from `ClickHouse/`, built `RelWithDebInfo` by `scripts/clickhouse-build`.
 
-## InodeDB on the NVMe drive
+## Fleets
+
+`demo/up`, `demo/load`, then `demo/bench`. The pool has 8 slots, and each query starts once the pool has replaced the last fleet's servers, so none waits for a boot. `SELECT count(), sum(duration_ms) FROM demo.events` over 20,000,000 rows, median of 10 runs, in ms:
+
+| Servers | Assign | Attach | Query | Total |
+| --- | --: | --: | --: | --: |
+| 1 | 13 | 22 | 49 | 98 |
+| 2 | 14 | 37 | 52 | 115 |
+| 4 | 15 | 45 | 53 | 126 |
+| 8 | 18 | 49 | 58 | 138 |
+
+- **Assign** writes each server's `config.d/tenant.xml` and runs `SYSTEM RELOAD CONFIG`, which starts the read-only disk and its InodeDB lease. The servers assign at once.
+- **Attach** lists the writer's databases in InodeDB and attaches them on the first server, which settles the set the fleet serves; then the other servers attach the same set at once. A fleet of one takes the first round alone.
+- **Query** runs with parallel replicas. Every server shares this machine's 24 cores, so a larger fleet adds coordination and no CPU.
+- The rest of each total, 12 to 14 ms, mints the query's read key with two `idb` calls and takes the servers from the pool.
+
+Back to back, fleets of 4 on 8 slots took 276 ms a query, since each waits for servers the pool is still replacing; the last fleet's 4 servers were replaced 483 ms after its answer.
+
+## Metadata
+
+`tests/bench.py` gives one server three disks over the same s3proxy and runs the same work on each: `local` metadata, `inodedb` metadata, and `inodedb` with inline files off (`inodedb_blobs`).
+
+- **Inserts.** 200 inserts of 1,000 rows one after another, then 200 more from 8 threads, into a table with merges stopped. Inserts are synchronous (`async_insert = 0`), so each writes its own part.
+- **10,000 parts.** 16 inserts at once write a table of 10,000 one-row partitions.
+- **Cold start.** The server restarts with only that table attached; the time runs until `SELECT count()` answers.
+
+### InodeDB on the NVMe drive
 
 `python3 tests/bench.py`
 
@@ -23,7 +45,7 @@
 | `inodedb` | 83 | 145 | 0.0 | 2.0 | 87.1 | 1.27 | 2,449 | 20,597 |
 | `inodedb_blobs` | 77 | 142 | 11.0 | 2.0 | 90.8 | 2.59 | 102,260 | 20,526 |
 
-## InodeDB on tmpfs
+### InodeDB on tmpfs
 
 `python3 tests/bench.py --tmpfs` runs an InodeDB of its own with its store in `/dev/shm`, which stands in for a drive whose syncs take microseconds, such as the datacenter NVMe in InodeDB's own benchmarks (17 to 53 µs).
 
@@ -33,7 +55,7 @@
 | `inodedb` | 318 | 2182 | 0.0 | 2.0 | 4.8 | 1.20 | 1,672 | 20,530 |
 | `inodedb_blobs` | 254 | 1468 | 11.0 | 2.0 | 6.6 | 2.51 | 102,156 | 20,614 |
 
-## Reading the numbers
+### Reading the numbers
 
 - **An insert makes two InodeDB commits.** The first holds the part's directory and files; the second renames the part to its final name and sets its modification time. `local` metadata makes neither: it writes local files and syncs none of them by default.
 - **Each commit waits for the store's sync.** On this drive that costs 2 ms. InodeDB groups concurrent commits into one sync: its own benchmark here commits 456 batches a second from one client, 3,499 from 16 and 9,041 from 128 (`cargo run --release -p inodedb-tests --example commits -- 3 sqlite`, store on the drive).

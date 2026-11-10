@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""Times queries through the query API at each fleet size: `demo/bench [runs]`, 10 runs by default.
+
+Each query starts once the pool has replaced the last fleet's servers, so none waits for a boot, and the table gives
+the median of each timing. Then fleets of 4 run back to back on 8 slots, each waiting for any servers still booting.
+It needs `demo/up` and `demo/load`, and prints Markdown for BENCHMARKS.md.
+"""
+
+from __future__ import annotations
+
+import json
+import statistics
+import sys
+import time
+
+from common import CONFIG, writer
+
+from bighouse import api
+
+SQL = "SELECT count(), sum(duration_ms) FROM demo.events"
+SIZES = (1, 2, 4, 8)
+TIMINGS = ("assign_ms", "attach_ms", "query_ms", "total_ms")
+
+
+def main() -> int:
+    runs = int(sys.argv[1]) if len(sys.argv) > 1 else 10
+    server = writer()
+    want = server.query(SQL)
+    rows = int(server.value("SELECT count() FROM demo.events"))
+    print(f"`{SQL}` over {rows:,} rows, median of {runs} runs, in ms:\n")
+    print("| Servers | Assign | Attach | Query | Total |")
+    print("| --- | --: | --: | --: | --: |")
+    with api.QueryApi(json.loads(CONFIG.read_text()), slots=8) as query_api:
+        for size in SIZES:
+            timings = []
+            for _ in range(runs):
+                query_api.pool.settle()
+                got, timing, _ = query_api.run(SQL, size)
+                if got != want:
+                    raise RuntimeError(f"a fleet of {size} answered {got!r}, and the writer {want!r}")
+                timings.append(timing)
+            medians = [statistics.median(timing[name] for timing in timings) for name in TIMINGS]
+            print(f"| {size} | " + " | ".join(f"{median:.0f}" for median in medians) + " |")
+
+        query_api.pool.settle()
+        started = time.monotonic()
+        for _ in range(runs):
+            query_api.run(SQL, 4)
+        each = (time.monotonic() - started) * 1000 / runs
+        started = time.monotonic()
+        query_api.pool.settle()
+        replaced = (time.monotonic() - started) * 1000
+    print(f"\nFleets of 4 back to back on 8 slots: {each:.0f} ms a query; the last fleet's servers were replaced "
+          f"{replaced:.0f} ms after its answer.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
