@@ -17,10 +17,14 @@ reports each measure's median. Writing the tables of many parts runs once.
 Each InodeDB commit waits for its store's sync. `--tmpfs` runs an InodeDB of its own on 127.0.0.1:7071 with its
 store in /dev/shm, which stands in for a drive whose syncs take microseconds.
 
-    python3 tests/bench.py [--inserts N] [--parts N] [--rounds N] [--tmpfs]
+`--shared` measures shared writers instead (`inodedb_writer_mode` = `shared`): 1, 2, 4 and 8 servers on one disk, each
+inserting from one thread, into one table and into a table each, with merges stopped. Reports inserts per second,
+InodeDB commits per insert, and commits retried because another writer took the block number.
 
-Prints a Markdown table and writes .dev/bench/results.json (results-tmpfs.json with `--tmpfs`). Needs
-`scripts/dev-up` and a built server.
+    python3 tests/bench.py [--inserts N] [--parts N] [--rounds N] [--tmpfs] [--shared]
+
+Prints a Markdown table and writes .dev/bench/results.json (results-tmpfs.json with `--tmpfs`, results-shared*.json
+with `--shared`). Needs `scripts/dev-up` and a built server.
 """
 
 from __future__ import annotations
@@ -167,6 +171,71 @@ def bench_cold_start(server: stack.Server, disk: str, parts: int) -> dict[str, f
     return result
 
 
+WRITER_COUNTS = (1, 2, 4, 8)
+
+
+def shared_writer(run: str, index: int, key: str) -> stack.Server:
+    prefix = f"bench/{run}"
+    return stack.Server(
+        name=f"bench-{run}-{index}", tcp_port=26000 + index, http_port=27000 + index, interserver_port=28000 + index,
+        disks=[stack.inodedb_disk_xml("inodedb", s3_prefix=prefix, key=key,
+                                      extra="" if index == 0 else "<inodedb_writer_mode>shared</inodedb_writer_mode>")],
+        policies=[stack.policy_xml("inodedb", "inodedb")],
+        extra_config="<merge_tree><storage_policy>inodedb</storage_policy></merge_tree><database_disk><disk>inodedb</disk></database_disk>",
+    )
+
+
+def bench_shared(inserts: int, rounds: int) -> dict[str, dict[str, float]]:
+    """Each shared writer inserts `inserts` times from one thread, into one table or a table of its own."""
+    run = uuid.uuid4().hex[:8]
+    key = stack.mint_key(f"bench/{run}", "write")
+    ddl = ["CREATE DATABASE bench"]
+    for round_ in range(rounds):
+        for count in WRITER_COUNTS:
+            ddl.append(f"CREATE TABLE bench.one_{count}_{round_} (k UInt64, v String) ENGINE = MergeTree ORDER BY k")
+            ddl += [f"CREATE TABLE bench.own_{count}_{round_}_{i} (k UInt64, v String) ENGINE = MergeTree ORDER BY k" for i in range(count)]
+    exclusive = shared_writer(run, 0, key)
+    exclusive.start()
+    try:
+        for statement in ddl:
+            exclusive.query(statement)
+    finally:
+        exclusive.stop()
+        exclusive.wipe()
+
+    writers = [shared_writer(run, i + 1, key) for i in range(max(WRITER_COUNTS))]
+    samples: dict[str, list[dict[str, float]]] = {}
+    try:
+        for writer in writers:
+            writer.start()
+            writer.query("SYSTEM STOP MERGES")
+        for round_ in range(rounds):
+            for count in WRITER_COUNTS:
+                for layout in ("one", "own"):
+                    tables = [f"bench.one_{count}_{round_}" if layout == "one" else f"bench.own_{count}_{round_}_{i}" for i in range(count)]
+                    active = writers[:count]
+                    before = {name: sum(events(w, (name,)) for w in active) for name in ("InodeDBCommit", "InodeDBCommitRetries", "InodeDBCommitConflicts")}
+                    insert = "INSERT INTO {} SELECT number, toString(number) FROM numbers(1000)"
+                    started = time.monotonic()
+                    with ThreadPoolExecutor(count) as pool:
+                        list(pool.map(lambda i: [active[i].query(insert.format(tables[i]), settings=SYNC) for _ in range(inserts)], range(count)))
+                    elapsed = time.monotonic() - started
+                    total = count * inserts
+                    after = {name: sum(events(w, (name,)) for w in active) for name in before}
+                    sample = {
+                        "inserts_per_s": total / elapsed,
+                        "commits_per_insert": (after["InodeDBCommit"] - before["InodeDBCommit"]) / total,
+                        "retries_per_insert": (after["InodeDBCommitRetries"] - before["InodeDBCommitRetries"]) / total,
+                    }
+                    samples.setdefault(f"{layout}_{count}", []).append(sample)
+                    print(f"{count} writers, {layout} table(s), round {round_ + 1}: {sample}", flush=True)
+    finally:
+        for writer in writers:
+            writer.stop()
+            writer.wipe()
+    return {name: medians(values) for name, values in samples.items()}
+
+
 def rotated(disks: tuple[str, ...], round_: int) -> tuple[str, ...]:
     """`disks`, starting from the one `round_` places first."""
     first = round_ % len(disks)
@@ -183,10 +252,30 @@ def main() -> int:
     parser.add_argument("--parts", type=int, default=10_000)
     parser.add_argument("--rounds", type=int, default=3, help="rounds of the inserts and of the cold starts")
     parser.add_argument("--tmpfs", action="store_true", help="run InodeDB with its store in /dev/shm")
+    parser.add_argument("--shared", action="store_true", help="measure shared writers")
     args = parser.parse_args()
 
     run = uuid.uuid4().hex[:8]
     inodedb = start_tmpfs_inodedb(run) if args.tmpfs else None
+    if args.shared:
+        try:
+            results = bench_shared(args.inserts, args.rounds)
+        finally:
+            if inodedb:
+                inodedb[0].terminate()
+                inodedb[0].wait(30)
+                shutil.rmtree(inodedb[1])
+        out = stack.DEV / ("bench/results-shared-tmpfs.json" if args.tmpfs else "bench/results-shared.json")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({"inserts": args.inserts, "rounds": args.rounds, "results": results}, indent=1))
+        print("\n| Writers | One table: inserts/s | Retries per insert | Commits per insert | A table each: inserts/s | Commits per insert |")
+        print("| --: | --: | --: | --: | --: | --: |")
+        for count in WRITER_COUNTS:
+            one, own = results[f"one_{count}"], results[f"own_{count}"]
+            print(f"| {count} | {one['inserts_per_s']:,.0f} | {one['retries_per_insert']:.2f} | {one['commits_per_insert']:.2f} "
+                  f"| {own['inserts_per_s']:,.0f} | {own['commits_per_insert']:.2f} |")
+        return 0
+
     server = make_server(run)
     server.start()
     inserts = (*DISKS, *INSERTS_ONLY)
