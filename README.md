@@ -100,7 +100,7 @@ demo/load                         # 20 million rows into demo.events
 python3 -m bighouse.api           # the query API on http://127.0.0.1:8080, with 16 warm slots
 ```
 
-`scripts/clickhouse-build` needs clang 21, CMake, Ninja and ccache, `scripts/inodedb-build` needs Rust, and `demo/up` needs Docker and Python 3.11 or later. Then ask a fleet of four:
+`scripts/clickhouse-build` needs clang 21, CMake, Ninja and ccache, `scripts/inodedb-build` needs Rust and `protoc` (`apt-get install protobuf-compiler`), and `demo/up` needs Docker and Python 3.11 or later. Then ask a fleet of four:
 
 ```console
 $ curl -s -D - 'http://127.0.0.1:8080/query?replicas=4' \

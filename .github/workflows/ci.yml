@@ -40,7 +40,7 @@ jobs:
       - name: Install the toolchain
         run: |
           wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 21
-          sudo apt-get install -y ninja-build ccache fuse3
+          sudo apt-get install -y ninja-build ccache fuse3 protobuf-compiler
 
       - uses: actions/cache/restore@v4
         with:
