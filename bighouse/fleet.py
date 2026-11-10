@@ -182,7 +182,8 @@ class Pool:
 
     def _boot(self, slot: Slot) -> None:
         server = slot.blank_server()
-        # A pool that was killed leaves its servers' directories, with a tenant's config and databases.
+        # A pool that was killed leaves its servers running, with a tenant's config and databases.
+        server.stop_leftover()
         server.wipe()
         try:
             server.start()

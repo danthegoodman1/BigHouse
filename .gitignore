@@ -1,3 +1,4 @@
 /build/
 /.dev/
 __pycache__/
+/tmp/

@@ -31,7 +31,7 @@ Make the TTL longer than the longest query plus the time to stop its servers, an
 5. Run the query on the first server with parallel replicas, and return the answer.
 6. Stop each server with SIGTERM and delete its directory, then revoke the key and boot a blank server in each slot.
 
-A workflow that resumes after a crash runs step 6 for the servers and key it recorded. The key's TTL bounds what even that misses. A host agent stops any fleet server that no workflow holds, since it keeps its slot's ports and the tenant's config until it stops.
+A workflow that resumes after a crash runs step 6 for the servers and key it recorded. The key's TTL bounds what even that misses. A host agent stops any fleet server that no workflow holds, since it keeps its slot's ports and the tenant's config until it stops. The demo's pool does this for its own slots as it boots them: it reads each server's pid from the server's directory, checks through a pidfd that the process still runs that server's config, and sends it SIGTERM.
 
 ## Fleet hosts
 

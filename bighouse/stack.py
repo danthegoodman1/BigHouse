@@ -7,6 +7,7 @@ disks keep blobs in s3proxy and metadata in InodeDB. It uses only the standard l
 from __future__ import annotations
 
 import os
+import select
 import shutil
 import signal
 import subprocess
@@ -127,6 +128,10 @@ class Server:
     def log(self) -> Path:
         return self.dir / "log/clickhouse-server.log"
 
+    @property
+    def pidfile(self) -> Path:
+        return self.dir / "pid"
+
     def write_config(self) -> None:
         for sub in ("data", "tmp", "user_files", "log", "format_schemas"):
             (self.dir / sub).mkdir(parents=True, exist_ok=True)
@@ -179,6 +184,7 @@ class Server:
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
+        self.pidfile.write_text(f"{self.process.pid}\n")
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
@@ -201,6 +207,7 @@ class Server:
                 self.process.kill()
                 self.process.wait()
         self.process = None
+        self.pidfile.unlink(missing_ok=True)
 
     def kill(self) -> None:
         """SIGKILL: the server gets no chance to finish anything."""
@@ -208,6 +215,34 @@ class Server:
             self.process.kill()
             self.process.wait()
         self.process = None
+        self.pidfile.unlink(missing_ok=True)
+
+    def stop_leftover(self, timeout: float = 60) -> None:
+        """Stops, as `stop` does, a server that a process now gone started in this directory and left running."""
+        try:
+            pid = int(self.pidfile.read_text())
+            pidfd = os.pidfd_open(pid)
+        except (FileNotFoundError, ProcessLookupError):
+            return
+        try:
+            # The pid may name another process by now. The pidfd keeps naming the one checked here.
+            if self.runs_as(pid):
+                signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+                if not select.select([pidfd], [], [], timeout)[0]:
+                    signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+                    select.select([pidfd], [], [])
+        except ProcessLookupError:
+            pass  # it exited on its own
+        finally:
+            os.close(pidfd)
+        self.pidfile.unlink(missing_ok=True)
+
+    def runs_as(self, pid: int) -> bool:
+        """Whether process `pid` is a server running this directory's config."""
+        try:
+            return str(self.dir / "config.xml") in Path(f"/proc/{pid}/cmdline").read_text().split("\0")
+        except (FileNotFoundError, ProcessLookupError):
+            return False
 
     def wipe(self) -> None:
         shutil.rmtree(self.dir, ignore_errors=True)

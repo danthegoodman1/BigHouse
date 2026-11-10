@@ -46,7 +46,7 @@ curl -s http://127.0.0.1:18200 --data-binary 'SELECT kind, count() FROM demo.eve
 python3 -m bighouse.api --port 8080 --slots 16
 ```
 
-The API reads `.dev/demo/config.json`, which `demo/up` writes. A slot is a fixed set of ports on `127.0.0.1`: slot `i` uses native port 20000+i, HTTP port 21000+i and interserver port 22000+i. The API boots a blank server in every slot as it starts, so queries find servers waiting, and the host runs at most one server per slot. Ctrl-C or SIGTERM stops the API and its servers; a killed API leaves its servers running.
+The API reads `.dev/demo/config.json`, which `demo/up` writes. A slot is a fixed set of ports on `127.0.0.1`: slot `i` uses native port 20000+i, HTTP port 21000+i and interserver port 22000+i. The API boots a blank server in every slot as it starts, so queries find servers waiting, and the host runs at most one server per slot. Ctrl-C or SIGTERM stops the API and its servers. An API killed with SIGKILL leaves its servers running, and the next API stops them as it boots its slots: each server's directory holds its pid.
 
 ## 4. Query
 
@@ -90,7 +90,8 @@ python3 demo/e2e.py
 - a query that needs servers still booting waits for them;
 - a fleet's servers stop once its query ends, and the pool then holds a fresh blank server in every slot;
 - a fleet answers while the writer is down;
-- no fleet server or directory outlives the pool.
+- no fleet server or directory outlives the pool;
+- a pool stops the servers an API killed with SIGKILL left in its slots.
 
 ## In production
 

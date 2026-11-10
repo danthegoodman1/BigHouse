@@ -10,6 +10,7 @@
 5. A fleet answers while the writer is down.
 6. Each fleet server serves one query: the pool stops it and boots a blank server in its slot, and leaves no server
    behind when it closes.
+7. A pool stops the servers that an API killed with SIGKILL left in its slots.
 
     demo/e2e.py [rows]        rows demo.events needs, 20 million by default: enough parts that every server of a
                               fleet of 4 gets a share
@@ -158,6 +159,23 @@ def main() -> int:
             run_checks(writer, query_api)
         finally:
             http.shutdown()
+            http.server_close()
+
+    # An API killed with SIGKILL leaves its servers running. The next pool stops them as it boots its slots.
+    killed = subprocess.Popen([sys.executable, "-m", "bighouse.api", "--port", str(API_PORT), "--slots", "2"],
+                              cwd=stack.ROOT, stdout=subprocess.PIPE, text=True)
+    if not killed.stdout.readline():  # it prints once its pool has booted
+        raise RuntimeError(f"the API exited with {killed.wait()} before its pool booted")
+    orphans = {int(server.pidfile.read_text()): server for server in (fleet.Slot(i).blank_server() for i in range(2))}
+    killed.kill()
+    killed.wait()
+    pool = fleet.Pool(2)
+    try:
+        pool.start()
+        check(not any(server.runs_as(pid) for pid, server in orphans.items()) and all(s.value("SELECT 1") == "1" for s in pool.idle()),
+              "a pool stops the servers a killed API left in its slots, and boots its own")
+    finally:
+        pool.close()
 
     leftover = [port for slot in range(8) for port in (fleet.Slot(slot).tcp_port, fleet.Slot(slot).http_port) if port_open(port)]
     check(not leftover, "no fleet server outlives the pool", f"ports still open: {leftover}")
