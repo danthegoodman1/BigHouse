@@ -2,7 +2,7 @@
 
 ## Overarching Goal
 
-BigHouse runs ClickHouse like BigQuery. One persistent writer ingests into `MergeTree` tables stored on S3, and each query summons a fleet of short-lived ClickHouse servers that read the same tables as parallel replicas, answer, and exit. The foundation is a new object-storage `metadata_type`, `inodedb`, that keeps the disk's file tree in [InodeDB](inodedb) and the blobs in S3, as [Custom Metadata for Object-Storage Disks](Custom%20Metadata%20for%20Object-Storage%20Disks.md) describes.
+BigHouse runs ClickHouse like BigQuery. One persistent writer ingests into `MergeTree` tables stored on S3, and each query summons a fleet of short-lived ClickHouse servers that read the same tables as parallel replicas, answer, and exit. The foundation is a new object-storage `metadata_type`, `inodedb`, that keeps the disk's file tree in [InodeDB](inodedb) and the blobs in S3.
 
 The `inodedb` metadata type matches an S3 disk with `local` metadata feature for feature. Every `MergeTree` workload that runs on `local` metadata runs on `inodedb` unchanged: hardlinks, mutations, lightweight deletes and updates, `FREEZE`, partition moves and copies, TTL moves, backups, appends, truncation, the `cache` and `encrypted` wrappers, and `ReplicatedMergeTree`. InodeDB has a real rename and real hardlinks, so the disk implements each operation directly, where `plain_rewritable` copies objects or refuses.
 
@@ -66,7 +66,7 @@ Goal:
 A clean branch that builds ClickHouse from the submodule, runs InodeDB and s3proxy locally, and reproduces the baseline: `MergeTree` on an S3 disk with `local` metadata over s3proxy.
 
 Scope:
-- The `rebuild` branch, holding the design, this plan and the ClickHouse submodule.
+- The `rebuild` branch, holding this plan and the ClickHouse submodule.
 - A ClickHouse fork, `danthegoodman1/ClickHouse`, with a `bighouse` branch cut from the pinned tag; the submodule points there.
 - InodeDB pinned as an `inodedb/` submodule.
 - `scripts/clickhouse-build`, `scripts/inodedb-build`, `scripts/dev-up`, `scripts/dev-down`.
@@ -85,7 +85,6 @@ Status ledger:
 | --- | --- | --- | --- |
 | Complete | Work | 0A: `rebuild` branch with the old project removed | `fd4451f` on `origin/rebuild`. |
 | Complete | Work | 0B: ClickHouse submodule from `v26.10.2.103-stable` | `.gitmodules` (`shallow = true`, `branch = bighouse`); the tag is `c6428ebcc39f`. |
-| Complete | Doc | Design doc line references | `Custom Metadata for Object-Storage Disks.md` cites lines of the pinned tag. |
 | Complete | Work | 0C: ClickHouse fork with a `bighouse` branch | `danthegoodman1/ClickHouse`, branch `bighouse`; `632ffeccc` adds `LICENSE-BIGHOUSE`, `38edf7c26` the metadata type. |
 | Complete | Work | 0D: InodeDB pinned as a submodule | `inodedb/` at `be669f1` of `github.com/danthegoodman1/inodedb`, which deletes expired keys and lists the free queue (`ListFreed`). The C++ client's copy of `inodedb.proto` is from `dc97a2c`; the two differ only by `ListFreed`, which the disk leaves uncalled. The dev store written by `dc97a2c` loads under `be669f1`, and `idb fsck` finds it sound. |
 | Complete | Work | 0E: `scripts/clickhouse-build`, `scripts/inodedb-build` | Builds `build/programs/clickhouse` (RelWithDebInfo, clang, Ninja, ccache; log in `build/build.log`) and `inodedb/target/release/{inodedb,idb}`. |

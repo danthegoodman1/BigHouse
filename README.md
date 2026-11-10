@@ -2,9 +2,9 @@
 
 [![CI](https://github.com/danthegoodman1/BigHouse/actions/workflows/ci.yml/badge.svg)](https://github.com/danthegoodman1/BigHouse/actions/workflows/ci.yml)
 
-BigHouse runs ClickHouse like BigQuery. One writer ingests into `MergeTree` tables on S3, and each query runs on a fleet of ClickHouse servers that read those tables as parallel replicas, answer, and make way for fresh ones. It rests on `inodedb`, a new `metadata_type` for ClickHouse's object-storage disks that keeps the disk's file tree in [InodeDB](https://github.com/danthegoodman1/inodedb), a transactional tree of inodes, and its blobs in S3. Any number of servers read the disk while its writer changes it, and a fleet needs nothing from the writer, so queries keep answering while it is down. The disk lives in a [fork of ClickHouse 26.10](https://github.com/danthegoodman1/ClickHouse/tree/bighouse), and a Python service with no dependencies runs the fleets.
+BigHouse runs ClickHouse like BigQuery. One writer ingests into `MergeTree` tables on S3, and each query runs on a fleet of ClickHouse servers that read those tables as parallel replicas, answer, and make way for fresh ones. It rests on `inodedb`, a new `metadata_type` for ClickHouse's object-storage disks that keeps the disk's file tree in [InodeDB](https://github.com/danthegoodman1/inodedb), a transactional tree of inodes, and its blobs in S3. Any number of servers read the disk while its writer changes it, and a fleet needs nothing from the writer, so queries keep answering while it is down. The disk's code lives on the `bighouse` branch of a [fork of ClickHouse 26.10](https://github.com/danthegoodman1/ClickHouse/tree/bighouse), which this repo pins as its `ClickHouse/` submodule, and a Python service with no dependencies runs the fleets.
 
-The disk matches an S3 disk with `local` metadata feature for feature. Of ClickHouse's 17,275 stateless tests, the five that fail only on `inodedb` read local metadata files, and pass once pointed at InodeDB's tree. Small files live in InodeDB, so 10,000 parts load in 1.27 s from 2,449 S3 reads, where `local` takes 2.33 s and 107,141 reads. A query that turns eight blank servers into the tenant's replicas and runs on them answers in 138 ms. [BENCHMARKS.md](BENCHMARKS.md) has every result and the commands to reproduce them, and [Custom Metadata for Object-Storage Disks](Custom%20Metadata%20for%20Object-Storage%20Disks.md) is the design.
+The disk matches an S3 disk with `local` metadata feature for feature. Of ClickHouse's 17,275 stateless tests, the five that fail only on `inodedb` read local metadata files, and pass once pointed at InodeDB's tree. Small files live in InodeDB, so 10,000 parts load in 1.27 s from 2,449 S3 reads, where `local` takes 2.33 s and 107,141 reads. A query that turns eight blank servers into the tenant's replicas and runs on them answers in 138 ms. [BENCHMARKS.md](BENCHMARKS.md) has every result and the commands to reproduce them.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/fleet-dark.png">
@@ -156,7 +156,6 @@ The query API takes `--port` (8080) and `--slots` (16), and reads the disk's loc
 
 ## Documentation
 
-- [Custom Metadata for Object-Storage Disks](Custom%20Metadata%20for%20Object-Storage%20Disks.md): how ClickHouse composes an object-storage disk, what its metadata layer stores, how `MergeTree` commits on a filesystem, the interfaces a metadata type implements, and read replicas with one writer.
 - [demo/README.md](demo/README.md): the demo, step by step, and what happens per query.
 - [PRODUCTION.md](PRODUCTION.md): each part of the demo in production, InodeDB keys and their TTLs, a query's steps as a durable workflow, fleet hosts, and S3.
 - [BENCHMARKS.md](BENCHMARKS.md): every benchmark result, the machine, and the commands to reproduce them.
