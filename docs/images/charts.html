@@ -129,22 +129,22 @@ html.capture[data-theme="dark"] { --bg: #0d1117; }
 
   <div class="card hero" id="metadata">
     <div class="hero-head">
-      <h1>10,000 parts start <em>1.9× as fast</em> as on local metadata, and the store's sync sets the insert rate</h1>
+      <h1>10,000 parts start <em>1.8× as fast</em> as on local metadata, and the store's sync sets the insert rate</h1>
       <div class="hero-meta">
         <span><b>tests/bench.py</b> · one server, a disk of each kind</span>
-        <span>1,000-row inserts, merges stopped · 10,000 one-row partitions</span>
+        <span>1,000-row inserts, merges stopped · 10,000 one-row partitions · median of 3 rounds</span>
         <span>Intel Core Ultra 9 285 · NVMe with a 2 ms <code>fdatasync</code></span>
       </div>
     </div>
     <div class="meta-grid" id="metadata-chart" role="img"></div>
     <div class="foot">
       <div class="key">
-        <span><i class="sw" style="background:var(--local)"></i>local</span>
-        <span><i class="sw" style="background:var(--nvme)"></i>inodedb, InodeDB on the NVMe drive</span>
-        <span><i class="sw" style="background:var(--tmpfs)"></i>inodedb, InodeDB on tmpfs</span>
+        <span><i class="sw" style="background:var(--local)"></i>S3, local metadata</span>
+        <span><i class="sw" style="background:var(--nvme)"></i>S3, inodedb, InodeDB on the NVMe drive</span>
+        <span><i class="sw" style="background:var(--tmpfs)"></i>S3, inodedb, InodeDB on tmpfs</span>
         <span><i class="sw" style="background:var(--durable)"></i>the server's own drive, every file synced</span>
       </div>
-      <span>local syncs nothing. Its figures come from the run with InodeDB on the drive.</span>
+      <span>local metadata syncs nothing, with fsync on or off. Its figures come from the run with InodeDB on the drive.</span>
     </div>
   </div>
 
@@ -159,12 +159,12 @@ const D = {
     [4, 15, 45, 53, 126],
     [8, 18, 49, 58, 138],
   ],
-  // BENCHMARKS.md, metadata: local, inodedb on the drive, inodedb on tmpfs, and for inserts the drive with fsync on
+  // BENCHMARKS.md, metadata: each panel's bars, by the disks below
   metadata: [
-    ["Cold start, 10,000 parts", "seconds until SELECT count() answers", [2.44, 1.30, 1.23], v => v.toFixed(2) + " s"],
-    ["S3 reads at that start", "objects read", [106895, 1847, 1885], v => fmt(v)],
-    ["Inserts a second, 1 thread", "one table, one part per insert", [319, 133, 336, 35], v => fmt(v)],
-    ["Inserts a second, 8 threads", "one table, one part per insert", [1149, 193, 1450, 84], v => fmt(v)],
+    ["Cold start, 10,000 parts", "seconds until SELECT count() answers", {local: 2.30, nvme: 1.29, tmpfs: 1.23}, v => v.toFixed(2) + " s"],
+    ["S3 reads at that start", "objects read", {local: 101939, nvme: 1411, tmpfs: 1822}, v => fmt(v)],
+    ["Inserts a second, 1 thread", "one table, one part per insert", {local: 325, local_fsync: 325, nvme: 131, tmpfs: 337, durable: 35}, v => fmt(v)],
+    ["Inserts a second, 8 threads", "one table, one part per insert", {local: 1374, local_fsync: 1356, nvme: 189, tmpfs: 1383, durable: 84}, v => fmt(v)],
   ],
 };
 
@@ -205,20 +205,28 @@ const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls)
 
 (function metadata() {
   const host = document.getElementById("metadata-chart");
-  const disks = [["local", "local"], ["nvme", "inodedb, NVMe"], ["tmpfs", "inodedb, tmpfs"], ["durable", "drive, fsync on"]];
+  // Each disk's color, label, and description for the screen-reader text, in the order the bars run.
+  const disks = {
+    local: ["local", "local", "local metadata"],
+    local_fsync: ["local", "local, fsync on", "local metadata with fsync on"],
+    nvme: ["nvme", "inodedb, NVMe", "inodedb with InodeDB on the NVMe drive"],
+    tmpfs: ["tmpfs", "inodedb, tmpfs", "inodedb with InodeDB on tmpfs"],
+    durable: ["durable", "own drive, fsync on", "the server's own drive with fsync on"],
+  };
   for (const [title, sub, values, show] of D.metadata) {
-    const panel = el("div", "panel"), bars = el("div", "bars"), max = Math.max(...values);
+    const panel = el("div", "panel"), bars = el("div", "bars"), max = Math.max(...Object.values(values));
     panel.append(el("h3", null, title), el("div", "sub", sub));
-    values.forEach((v, i) => {
-      const b = el("div", "b"), bar = el("span", "bar");
-      bar.style.width = (v / max) * 72 + "%"; bar.style.background = `var(--${disks[i][0]})`;
-      b.append(bar, el("span", i === 1 || i === 2 ? "v lead" : "v", show(v)));
-      bars.append(el("div", "name", disks[i][1]), b);
-    });
+    for (const [key, [color, name]] of Object.entries(disks)) {
+      if (!(key in values)) continue;
+      const v = values[key], b = el("div", "b"), bar = el("span", "bar");
+      bar.style.width = (v / max) * 72 + "%"; bar.style.background = `var(--${color})`;
+      b.append(bar, el("span", key === "nvme" || key === "tmpfs" ? "v lead" : "v", show(v)));
+      bars.append(el("div", "name", name), b);
+    }
     panel.append(bars); host.append(panel);
   }
-  host.setAttribute("aria-label", "local metadata, inodedb with InodeDB on the NVMe drive, inodedb with InodeDB on tmpfs, and for inserts the server's own drive with fsync on: " +
-    D.metadata.map(([t, , v, show]) => `${t} ${v.map(show).join(", ")}`).join("; ") + ".");
+  host.setAttribute("aria-label", D.metadata.map(([t, , values, show]) =>
+    `${t}: ` + Object.entries(disks).filter(([key]) => key in values).map(([key, [, , what]]) => `${what} ${show(values[key])}`).join(", ")).join("; ") + ".");
 })();
 </script>
 </body>
