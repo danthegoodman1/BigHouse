@@ -6,7 +6,7 @@ BigHouse runs ClickHouse like BigQuery. One persistent writer ingests into `Merg
 
 The `inodedb` metadata type matches an S3 disk with `local` metadata feature for feature. Every `MergeTree` workload that runs on `local` metadata runs on `inodedb` unchanged: hardlinks, mutations, lightweight deletes and updates, `FREEZE`, partition moves and copies, TTL moves, backups, appends, truncation, the `cache` and `encrypted` wrappers, and `ReplicatedMergeTree`. InodeDB has a real rename and real hardlinks, so the disk implements each operation directly, where `plain_rewritable` copies objects or refuses.
 
-Each table has one writer. The demo runs on one machine with s3proxy standing in for S3.
+A disk has one exclusive writer, or several shared writers that insert and merge at once and coordinate through files in InodeDB that each commit checks in the same batch as its part. An exclusive writer runs DDL, mutations and partition commands, and fences every shared writer. The demo runs on one machine with s3proxy standing in for S3.
 
 ## Layout
 
@@ -17,7 +17,7 @@ Each table has one writer. The demo runs on one machine with s3proxy standing in
 | `inodedb/` | Submodule: InodeDB. The client's `proto/inodedb.proto` copies its API as of `dc97a2c`; the pinned `be669f1` adds `ListFreed`, which the disk leaves uncalled. |
 | `scripts/` | `clickhouse-build`, `inodedb-build`, `dev-up`, `dev-down`. |
 | `bighouse/` | `stack.py` (keys, disk configs, servers), `catalog.py` (the writer's databases in InodeDB), `fleet.py` (slots, the pool of blank servers, and fleets), `api.py` (the query API). |
-| `tests/` | `features.py`, `crash.py`, `claims.py`, `fence.py`, `replicas.py`, `discovery.py`, `parity.py`, `bench.py`. |
+| `tests/` | `features.py`, `crash.py`, `claims.py`, `fence.py`, `replicas.py`, `discovery.py`, `parity.py`, `bench.py`, `shared.py`. |
 | `demo/` | `up`, `down`, `load`, `bench`, `e2e.py`. |
 | `docs/images/` | The README's charts: `charts.html` holds their data, and `render.sh` renders them. |
 
@@ -287,3 +287,78 @@ Status ledger:
 | Complete | Doc | 6D: README, walkthrough and production guide | `README.md`: what BigHouse is, its features, performance with two charts (`docs/images/`), trade-offs, a comparison with `local` and `plain_rewritable` metadata, a quick start, configuration and development. `demo/README.md`: starting the writer, loading data, the query API, a query and its headers, what happens per query, `demo/e2e.py`, and stopping. `PRODUCTION.md`: each part's production counterpart, keys and their TTLs, a query's steps as a durable workflow, fleet hosts and S3. |
 | Complete | Test | Concurrent queries | `demo/e2e.py`: two queries at once take separate slots and both answer. |
 | In Progress | Gate | `demo/e2e.py` matches the writer at 1, 2 and 4 servers | Locally 28 of 28 checks pass on InodeDB `be669f1`, at 1, 2, 4 and 8 servers on the warm pool (5H), and each server of a fleet of 4 reads a share of the marks (599, 694, 576 and 576). `demo/bench`: 98, 115, 126 and 138 ms a query at 1, 2, 4 and 8 servers (`BENCHMARKS.md`). Missing: a CI run. |
+
+## Phase 7: Shared Writers and Merge Leases
+
+Goal:
+Several ClickHouse writers write one `inodedb` disk at once, some inserting and some merging, and coordinate block numbers, deduplication and merges through files in InodeDB. State one writer keeps in memory moves into InodeDB, and each commit checks it in the same batch as the part. Read replicas and the query API work unchanged: part names, the tree's layout and part transitions stay stock, so a merged part appears first and its sources leave after `old_parts_lifetime`.
+
+Scope:
+- 7A: Writer modes. `inodedb_writer_mode` is `exclusive` (the default, today's behavior) or `shared`. `owner` holds the mode: an exclusive writer writes a new owner and fences every other writer; a shared writer joins a shared owner, or replaces an exclusive one under its version. Every commit requires the owner version the writer started with. Each writer takes a random id at startup, and a shared writer holds a reader lease, as replicas do.
+- 7B: Commit options. `InodeDBCommitOptions` joins `TransactionCommitOptionsVariant` (`src/Disks/DiskCommitTransactionOptions.h`, after `MetaInKeeperCommitOptions`): ops and predicates that join the transaction's batch. `InodeDBCommitOutcome` joins `TransactionCommitOutcomeVariant` and tells apart committed, fenced, counter conflict, duplicate token, schema changed and claim lost. A failed outcome keeps the transaction's blobs and operations, so the caller can retry.
+- 7C: Coordination layout. `coord/` beside `tree/` mirrors table paths: `coord/<table path>/block_number`, `coord/<table path>/tokens/<block id>` and `coord/<table path>/claims/<part name>`. Removing a directory under `tree/` also removes its mirror in the same batch (`RemoveAll` with `IfExists`), so `DROP TABLE` removes a table's files. A replica's listings, part loading and `idb` paths under `tree/` stay as they are.
+- 7D: Block numbers. `StorageMergeTree::increment` becomes the table's counter file in shared mode. An insert's commit replaces the counter with the part's number under the counter's version. On a conflict the writer reads the counter again and renames the part again in the same open transaction, so the batch holds both renames, and retries. The part enters the table's in-memory set only once InodeDB has committed it.
+- 7E: Deduplication tokens. One file per block id, created with `Create` in the part's batch, in both modes, replacing `MergeTreeDeduplicationLog` on `inodedb` disks.
+- 7F: Schema. A shared writer's inserts and merges require the version of the table's `.sql` file it loaded; a failed check throws a retryable error.
+- 7G: Part-set refresh for shared writers.
+- 7H: Merge claims.
+- 7I: Cleanup rules in shared mode.
+- 7J: Writes a shared writer refuses.
+- 7K: ProfileEvents for commit conflicts, retries, and claims taken and lost.
+- 7L: `tests/shared.py` and the benchmarks.
+- 7M: `README.md`, `PRODUCTION.md` and the layout documentation for a control plane.
+
+Out of scope:
+- The supervisor that runs writers per tenant.
+- Mutations, DDL, partition commands and lightweight updates and deletes in shared mode.
+- One atomic commit for a source part and its materialized views' parts.
+- The orphan sweep (4C). Shared writers add orphans: a writer killed mid-insert or mid-merge leaves the blobs it uploaded, as an exclusive writer does, and so does a merge whose claim another writer took over.
+
+Completion gate:
+Exclusive mode passes every earlier suite and keeps its benchmarks within noise. Shared writers pass the concurrency, exactly-once, merge, lease, mode-change, differential and kill-loop gates below, and `BENCHMARKS.md` records their insert rates and conflict rates.
+
+Testing plan:
+- The earlier suites, unchanged, for exclusive mode: `tests/parity.py`, `features.py`, `crash.py`, `fence.py`, `claims.py`, `replicas.py`, `discovery.py`, `demo/e2e.py`, `tests/bench.py`.
+- `tests/shared.py`, one scenario per gate and hazard, each hazard's test run once more with its protection turned off through a failpoint or a setting, where it must fail.
+- A kill loop in `tests/shared.py --kill-rounds N`.
+- `tests/bench.py --shared` for 1, 2, 4 and 8 writers.
+
+Status ledger:
+
+| Status | Type | Item | Evidence / Gap |
+| --- | --- | --- | --- |
+| Complete | Decision | Coordination files live beside `tree/` | The brief allowed a directory inside the table directory, after `deduplication_logs/`, but a replica's attach lists the table directory, and one more entry there is one more name in every listing. Under `coord/`, mirrored by path, nothing under `tree/` changes. `DROP TABLE` reaches the disk as removals of the table's directory (`MergeTreeData::dropAllData`), which remove the mirror in the same batch. |
+| Complete | Decision | Shared writers reconcile the counter at startup; exclusive writers leave it | A shared writer that starts a table sets the counter to at least the highest block number it loaded, its mutations' versions included (`StorageMergeTree::loadMutations` raises `increment` the same way), under the counter's version. It joined its epoch, which fences every exclusive writer, before it loaded the parts (`MetadataStorageFromInodeDB::startup` runs before tables load), so it sees every part an exclusive writer committed. Exclusive commits stay as they are, and no benchmark of them changes; the brief's alternative, an exclusive writer writing the counter with each part, buys nothing a shared writer's startup needs. |
+| Complete | Decision | A merge's view is complete below the counter it read | A refresh reads the counter, C, then lists the table directory. Every part numbered at or below C committed with the counter at or before C's version, so the listing, which reflects at least its first page's version, holds each such part, or a part that covers it while the covered part's directory lasts `old_parts_lifetime`. A merge takes only parts whose highest block is at most C; a refresh that runs longer than half of `old_parts_lifetime` starts over. InodeDB pages a listing at 1,024 entries, and later pages can be newer (`inodedb/DESIGN.md`, API), which is the hazard below. |
+| Complete | Decision | Claims record their result and never move once the result commits | A claim file holds the holder's writer id, an expiry and the result part's name, `held`; the merge's commit rewrites each claim, under its version, to `done`. A writer takes over only a `held` claim past its expiry. A `done` claim stays until its source part's directory is gone, and cleanup removes it after the directory, never before, so a writer whose view is stale finds either the claim or no source directory, and a merge's commit requires every source directory. |
+| Complete | Decision | Exclusive writers keep the deduplication window by count | `non_replicated_deduplication_window` counts blocks, and the stateless suite tests the count. An exclusive writer keeps the window in memory, as `MergeTreeDeduplicationLog` does, loads it from the token files' creation versions at startup, and removes the tokens that fall out of the window in the batch that adds new ones. Shared writers expire tokens by age, `inodedb_deduplication_token_ttl_seconds`, and keep at most the window's count, oldest first, in their cleanup. Dropping a part removes its tokens, as `MergeTreeDeduplicationLog::dropPart` does. |
+| Complete | Decision | Pending mutations in shared mode | A shared writer loads mutation entries and leaves them: it runs no mutation and removes no entry, and `MergeTreeData`'s merge selector already keeps parts that a pending mutation still has to change from merging with parts it has changed. An exclusive writer finishes them. New parts take numbers above every entry's version, so no mutation applies to them. |
+| Complete | Decision | Temporary directories carry the writer id | `tmp_insert_` names come from the part name and `insert_increment`, which restarts at 0 in every process, so two writers name their first temporary parts alike. Inserts take the writer id through `MergeTreeData::getPostfixForTempInsertName`, and merges through the merge's suffix, which `MergeTask` already appends for `OPTIMIZE ... DRY RUN`. |
+| Incomplete | Work | 7A: Writer modes | Missing: the setting, the owner modes, the writer id, the shared reader lease, and `tests/shared.py` checks that an exclusive writer fences shared ones and that revoking one shared writer's key fences only it. |
+| Incomplete | Work | 7B: Commit options and outcomes | Missing: the variant alternatives, their handling in `MetadataStorageFromInodeDBTransaction::tryCommit`, and a gtest per outcome. |
+| Incomplete | Work | 7C: Coordination layout | Missing: the mirror removal and a check that `DROP TABLE` leaves nothing under `coord/`. |
+| Incomplete | Work | 7D: Block numbers | Missing: the counter, the retry, and the startup reconcile. |
+| Incomplete | Work | 7E: Deduplication tokens | Missing: tokens in both modes, their window and expiry, and the parity run's deduplication tests on them. |
+| Incomplete | Work | 7F: Schema condition | Missing: the condition and a test where an exclusive writer's `ALTER` makes a shared writer's insert retry. |
+| Incomplete | Work | 7G: Part-set refresh | Missing: `refreshDataPartsOnce` for shared writers, reconciled with their own inserts and merges; the cache following other writers. |
+| Incomplete | Work | 7H: Merge claims | Missing: claims before a merge, renewal while it runs, takeover past expiry, the commit's conditions, and a documented layout. |
+| Incomplete | Work | 7I: Cleanup rules | Missing: shared-mode rules for `clearOldPartsFromFilesystem`, `clearOldTemporaryDirectories`, `clearOldMutations`, `clearEmptyParts`, `clearUnusedPatchParts`, expired tokens and dead writers' claims, each idempotent across writers. |
+| Incomplete | Work | 7J: Refused writes | Missing: errors naming exclusive mode for `ALTER`, mutations, lightweight updates and deletes, partition commands, `TRUNCATE`, `CREATE`, `DROP` and `RENAME`. |
+| Incomplete | Work | 7K: ProfileEvents | Missing: `InodeDBCommitConflicts`, `InodeDBCommitRetries`, `InodeDBClaimsTaken`, `InodeDBClaimsLost`. |
+| Incomplete | Risk | A reserved block number | A number allocated before its part commits can fall inside a range another writer's merge covers, and the late part loads as outdated. Protection: 7D gives a number only in its part's batch. Patch parts take a number before they write (`StorageMergeTree.cpp:1528`) and store it in their data, so lightweight updates stay exclusive. Missing: a test that reserves a number before writing, through a failpoint, and finds a part lost. |
+| Incomplete | Risk | A listing that is no snapshot | Names sort by bytes, so `202611_10_10_0` precedes `202611_9_9_0`, and a refresh that sees part 30 and misses part 10 lets a merge of 9 and 30 cover 10 through 29. Protection: the decision above. Missing: a test with more than 1,024 parts, run once with merges limited to the counter and once without. |
+| Incomplete | Risk | Overlapping merges | Merge `4_6_1`, then `4_7_2`; a writer with a stale view merges 3 through 6 into `3_6_1`, which intersects `4_7_2`. Protection: claims outlive the merge. Missing: a test that holds a writer's view stale and finds no intersecting parts, and fails with claims removed at the merge's commit. |
+| Incomplete | Risk | Startup cleanup | A starting writer deletes every temporary directory with lifetime 0 (`StorageMergeTree::startup`, `clearOldTemporaryDirectories(0, ...)`), another writer's running merge among them. Protection: 7I. Missing: a test that starts a writer during another's merge. |
+| Incomplete | Risk | Lost deduplication tokens | `MergeTreeSink::commitPart` appends to the deduplication log before the part commits, and on an object-storage disk the log is durable only at rotation or shutdown. A fenced writer's insert committed to its source table and failed on the way to a view; the retry with the same `insert_deduplication_token` doubled the source rows (observed in the libch session). Protection: 7E. Missing: the exactly-once gate. |
+| Incomplete | Risk | Source and view parts commit separately | With tokens and `deduplicate_blocks_in_dependent_materialized_views`, a retry skips the source and fills in the view's table. Missing: the exactly-once gate. |
+| Incomplete | Risk | In-memory part counts | `parts_to_delay_insert` and `parts_to_throw_insert` count the writer's own part set, which is stale between refreshes. Protection: shared writers refresh every `refresh_parts_interval`, 1 s unless set. Missing: a test where N writers each see the others' parts and throttle. |
+| Incomplete | Gate | Exclusive mode is unchanged | Missing: the earlier suites on the new build, and `BENCHMARKS.md` numbers within noise. |
+| Incomplete | Gate | Concurrent inserts | N shared writers insert into one table through a materialized view and a projection: exact row counts, unique block numbers, and a replica fleet reading exact counts throughout. Missing. |
+| Incomplete | Gate | Exactly once | `SIGKILL` before the source commit, between the source and view commits, and after both; a fence by an exclusive writer; a revoked key. A retry with the same token leaves each row once in the source and once in the view's table. Missing. |
+| Incomplete | Gate | Merges | Merging writers beside inserting writers on a table of more than 1,024 parts: parts never intersect, a fresh exclusive writer loads the disk with nothing broken, and `CHECK TABLE` passes. Missing. |
+| Incomplete | Gate | Leases | Two writers race for overlapping ranges and one merges; a killed holder's claims expire and another writer takes over; a holder that lost its claim commits nothing visible. Missing. |
+| Incomplete | Gate | Mode changes | Shared to exclusive and back under load: block numbers stay unique and fenced commits apply nothing. Missing. |
+| Incomplete | Gate | Differential | One workload through one exclusive writer and through shared writers gives equal answers for `MergeTree`, `ReplacingMergeTree`, `SummingMergeTree`, `AggregatingMergeTree`, `CollapsingMergeTree` and `VersionedCollapsingMergeTree`, after `FINAL` where the engine needs it. Missing. |
+| Incomplete | Gate | Kill loop | `SIGKILL` random writers at random points for many rounds, then every invariant above. Missing. |
+| Incomplete | Test | Benchmarks | Inserts a second with 1, 2, 4 and 8 shared writers on one table and on separate tables, InodeDB commits per insert, and the conflict rate, in `BENCHMARKS.md`. Missing. |
+| Incomplete | Doc | 7M: Docs | Missing: `README.md` and `PRODUCTION.md` where they say a disk has one writer, and the `coord/` layout for a control plane holding a write key. |
