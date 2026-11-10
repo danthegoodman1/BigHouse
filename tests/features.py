@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Runs each feature on a disk with `local` metadata and on one with `inodedb` metadata, and requires the same
-answers from both. Needs `scripts/dev-up` and a built server.
+answers from both. Then checks that data survives a restart, that an insert on the `inodedb` disk makes one InodeDB
+commit and a deduplicated one leaves no blob, and that every blob goes once its tables are gone. Needs
+`scripts/dev-up` and a built server.
 
     python3 tests/features.py [scenario ...]
 """
@@ -296,6 +298,33 @@ def main() -> int:
         server.query("DROP TABLE default.persist SYNC")
         failures += not ok
         print(f"{'PASS' if ok else 'FAIL'} restart")
+
+        # An insert on the InodeDB disk commits its part's files together with the part's rename.
+        server.query("CREATE TABLE default.once (k UInt64, v String) ENGINE = MergeTree ORDER BY k "
+                     "SETTINGS storage_policy = 's3_inodedb', non_replicated_deduplication_window = 10")
+        server.query("SYSTEM STOP MERGES default.once")
+        # Hashes compress poorly, so the part's data outgrows the inline limit and goes to blobs.
+        insert = "INSERT INTO default.once SELECT number, hex(cityHash64(number)) FROM numbers(100000)"
+        commits = "SELECT value FROM system.events WHERE event = 'InodeDBCommit'"
+        # The token makes the repeated `INSERT SELECT` below a duplicate of this one.
+        token = {"insert_deduplication_token": "once"}
+        before = int(server.value(commits))
+        server.query(insert, settings=token)
+        made = int(server.value(commits)) - before
+        ok = made == 1
+        failures += not ok
+        print(f"{'PASS' if ok else 'FAIL'} an insert makes one InodeDB commit" + ("" if ok else f": it made {made}"))
+
+        # A deduplicated insert undoes its part, which removes the blobs it uploaded.
+        blobs = stack.s3_objects(server.s3_prefixes["s3_inodedb"])
+        server.query(insert, settings=token)
+        rows = server.value("SELECT count() FROM default.once")
+        left = sorted(set(stack.s3_objects(server.s3_prefixes["s3_inodedb"])) - set(blobs))
+        ok = rows == "100000" and len(blobs) > 0 and not left
+        failures += not ok
+        print(f"{'PASS' if ok else 'FAIL'} a deduplicated insert leaves no blob"
+              + ("" if ok else f": {rows} rows, {len(blobs)} blobs before, {len(left)} new: {left[:3]}"))
+        server.query("DROP TABLE default.once SYNC")
 
         # Every blob goes once its tables are gone, on both disks.
         for p in POLICIES:
