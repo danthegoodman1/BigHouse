@@ -1,1 +1,0 @@
-fly machines list -a test-bighouse-t -j | jq ".[] | .id" | sed 's/\"//g' | bash delete-machines.sh

@@ -1,0 +1,313 @@
+#!/usr/bin/env python3
+"""Runs each feature on a disk with `local` metadata and on one with `inodedb` metadata, and requires the same
+answers from both. Needs `scripts/dev-up` and a built server.
+
+    python3 tests/features.py [scenario ...]
+"""
+
+from __future__ import annotations
+
+import sys
+import time
+import traceback
+import uuid
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from bighouse import stack  # noqa: E402
+
+POLICIES = ("s3_local", "s3_inodedb")
+DISKS = {"s3_local": "s3_local", "s3_inodedb": "s3_inodedb"}
+
+
+def make_server() -> stack.Server:
+    run = uuid.uuid4().hex[:8]
+    key = stack.mint_key(f"features/{run}", "write")
+    server = stack.Server(
+        name=f"features-{run}",
+        tcp_port=19000,
+        http_port=18123,
+        interserver_port=19009,
+        disks=[
+            stack.local_metadata_disk_xml("s3_local", s3_prefix=f"features/{run}/local"),
+            stack.inodedb_disk_xml("s3_inodedb", s3_prefix=f"features/{run}/inodedb", key=key),
+            f"<backups_disk><type>local</type><path>{stack.DEV}/servers/features-{run}/backups/</path></backups_disk>",
+            # Each metadata type also under the `cache` and `encrypted` wrappers.
+            *(f"""<{d}_cache><type>cache</type><disk>{d}</disk><path>{stack.DEV}/servers/features-{run}/cache_{d}/</path><max_size>1Gi</max_size></{d}_cache>
+                <{d}_encrypted><type>encrypted</type><disk>{d}_cache</disk><key>1234567812345678</key><path>encrypted/</path></{d}_encrypted>"""
+              for d in DISKS.values()),
+        ],
+        policies=[stack.policy_xml(p, DISKS[p]) for p in POLICIES]
+        + [stack.policy_xml(f"{p}_encrypted", f"{DISKS[p]}_encrypted") for p in POLICIES]
+        + ["<tiered><volumes><hot><disk>default</disk></hot><cold><disk>s3_inodedb</disk></cold></volumes></tiered>"],
+        extra_config=f"""<backups><allowed_disk>backups_disk</allowed_disk><allowed_path>/</allowed_path></backups>
+    <keeper_server>
+        <tcp_port>19181</tcp_port>
+        <server_id>1</server_id>
+        <log_storage_path>{stack.DEV}/servers/features-{run}/coordination/log</log_storage_path>
+        <snapshot_storage_path>{stack.DEV}/servers/features-{run}/coordination/snapshots</snapshot_storage_path>
+        <raft_configuration><server><id>1</id><hostname>127.0.0.1</hostname><port>19234</port></server></raft_configuration>
+    </keeper_server>
+    <zookeeper><node><host>127.0.0.1</host><port>19181</port></node></zookeeper>""",
+    )
+    server.s3_prefixes = {"s3_local": f"features/{run}/local", "s3_inodedb": f"features/{run}/inodedb"}
+    return server
+
+
+def check_table(s: stack.Server, table: str) -> str:
+    """`CHECK TABLE`'s rows, one per part, in a fixed order."""
+    return "".join(sorted(s.query(f"CHECK TABLE {table}").splitlines(keepends=True)))
+
+
+def scenario_insert_merge(s: stack.Server, p: str) -> list[str]:
+    s.query(f"CREATE TABLE t (k UInt64, v String) ENGINE = MergeTree ORDER BY k SETTINGS storage_policy = '{p}'")
+    for i in range(3):
+        s.query(f"INSERT INTO t SELECT number + {i * 1000}, toString(number) FROM numbers(1000)")
+    out = [s.query("SELECT count(), sum(k), max(v) FROM t"), s.query("SELECT count() FROM system.parts WHERE table = 't' AND active")]
+    s.query("OPTIMIZE TABLE t FINAL")
+    out += [s.query("SELECT count(), sum(k) FROM t"), s.query("SELECT count() FROM system.parts WHERE table = 't' AND active")]
+    out.append(check_table(s, "t"))
+    return out
+
+
+def scenario_mutations(s: stack.Server, p: str) -> list[str]:
+    s.query(f"CREATE TABLE t (k UInt64, a UInt64, b String) ENGINE = MergeTree ORDER BY k SETTINGS storage_policy = '{p}'")
+    s.query("INSERT INTO t SELECT number, number * 2, toString(number) FROM numbers(10000)")
+    s.query("ALTER TABLE t UPDATE a = a + 1 WHERE k % 2 = 0", settings={"mutations_sync": 2})
+    out = [s.query("SELECT sum(a), count() FROM t")]
+    s.query("ALTER TABLE t DELETE WHERE k % 3 = 0", settings={"mutations_sync": 2})
+    out.append(s.query("SELECT sum(a), count() FROM t"))
+    s.query("DELETE FROM t WHERE k % 5 = 0")
+    out.append(s.query("SELECT sum(a), count() FROM t"))
+    s.query("ALTER TABLE t ADD COLUMN c UInt8 DEFAULT 7")
+    s.query("ALTER TABLE t MATERIALIZE COLUMN c", settings={"mutations_sync": 2})
+    s.query("ALTER TABLE t DROP COLUMN b", settings={"mutations_sync": 2})
+    out.append(s.query("SELECT sum(a), sum(c), count() FROM t"))
+    out.append(check_table(s, "t"))
+    return out
+
+
+def scenario_partitions(s: stack.Server, p: str) -> list[str]:
+    for name in ("t", "t2", "t3"):
+        s.query(f"CREATE TABLE {name} (d UInt8, k UInt64) ENGINE = MergeTree PARTITION BY d ORDER BY k SETTINGS storage_policy = '{p}'")
+    s.query("INSERT INTO t SELECT number % 4, number FROM numbers(4000)")
+    s.query("INSERT INTO t2 SELECT 9, number FROM numbers(100)")
+    out = [s.query("SELECT d, count() FROM t GROUP BY d ORDER BY d")]
+    s.query("ALTER TABLE t DETACH PARTITION 1")
+    out.append(s.query("SELECT count() FROM t"))
+    s.query("ALTER TABLE t ATTACH PARTITION 1")
+    out.append(s.query("SELECT count() FROM t"))
+    s.query("ALTER TABLE t DROP PARTITION 2")
+    s.query("ALTER TABLE t ATTACH PARTITION 9 FROM t2")
+    s.query("ALTER TABLE t3 REPLACE PARTITION 0 FROM t")
+    s.query("ALTER TABLE t MOVE PARTITION 3 TO TABLE t3")
+    out += [s.query("SELECT d, count() FROM t GROUP BY d ORDER BY d"), s.query("SELECT d, count() FROM t3 GROUP BY d ORDER BY d")]
+    s.query("ALTER TABLE t DETACH PARTITION 0")
+    s.query("ALTER TABLE t DROP DETACHED PARTITION 0", settings={"allow_drop_detached": 1})
+    out.append(s.query("SELECT count() FROM system.detached_parts WHERE table = 't'"))
+    return out
+
+
+def scenario_freeze(s: stack.Server, p: str) -> list[str]:
+    s.query(f"CREATE TABLE t (k UInt64, v UInt64) ENGINE = MergeTree ORDER BY k SETTINGS storage_policy = '{p}'")
+    s.query("INSERT INTO t SELECT number, number FROM numbers(1000)")
+    s.query("ALTER TABLE t FREEZE WITH NAME 'snap'")
+    s.query("ALTER TABLE t UPDATE v = v + 1 WHERE 1", settings={"mutations_sync": 2})
+    s.query("OPTIMIZE TABLE t FINAL")
+    out = [s.query("SELECT sum(v) FROM t")]
+    s.query("ALTER TABLE t UNFREEZE WITH NAME 'snap'")
+    out.append(s.query("SELECT sum(v) FROM t"))
+    return out
+
+
+def scenario_ttl_projection_index(s: stack.Server, p: str) -> list[str]:
+    s.query(
+        f"""CREATE TABLE t (d DateTime, k UInt64, s String, INDEX idx s TYPE bloom_filter GRANULARITY 1,
+            PROJECTION by_s (SELECT s, count() GROUP BY s))
+        ENGINE = MergeTree ORDER BY k TTL d + INTERVAL 1 DAY SETTINGS storage_policy = '{p}'"""
+    )
+    s.query("INSERT INTO t SELECT if(number % 2, now(), now() - INTERVAL 2 DAY), number, toString(number % 10) FROM numbers(5000)")
+    s.query("ALTER TABLE t MATERIALIZE TTL", settings={"mutations_sync": 2})
+    s.query("OPTIMIZE TABLE t FINAL")
+    return [
+        s.query("SELECT count() FROM t"),
+        s.query("SELECT s, count() FROM t GROUP BY s ORDER BY s"),
+        s.query("SELECT count() FROM t WHERE s = '3'"),
+        check_table(s, "t"),
+    ]
+
+
+def scenario_log_engines(s: stack.Server, p: str) -> list[str]:
+    out = []
+    for engine in ("TinyLog", "StripeLog", "Log"):
+        s.query(f"CREATE TABLE t_{engine} (k UInt64, s String) ENGINE = {engine} SETTINGS disk = '{DISKS[p]}'")
+        for i in range(30):
+            s.query(f"INSERT INTO t_{engine} SELECT number + {i * 100}, toString(number) FROM numbers(100)")
+        out.append(s.query(f"SELECT count(), sum(k), max(s) FROM t_{engine}"))
+        s.query(f"TRUNCATE TABLE t_{engine}")
+        s.query(f"INSERT INTO t_{engine} VALUES (1, 'x')")
+        out.append(s.query(f"SELECT * FROM t_{engine}"))
+    return out
+
+
+def scenario_tables(s: stack.Server, p: str) -> list[str]:
+    s.query(f"CREATE TABLE t (k UInt64) ENGINE = MergeTree ORDER BY k SETTINGS storage_policy = '{p}'")
+    s.query(f"CREATE TABLE u (k UInt64) ENGINE = MergeTree ORDER BY k SETTINGS storage_policy = '{p}'")
+    s.query("INSERT INTO t SELECT number FROM numbers(10)")
+    s.query("INSERT INTO u SELECT number FROM numbers(20)")
+    s.query("RENAME TABLE t TO t_renamed")
+    s.query("EXCHANGE TABLES t_renamed AND u")
+    out = [s.query("SELECT count() FROM t_renamed"), s.query("SELECT count() FROM u")]
+    s.query("TRUNCATE TABLE u")
+    out.append(s.query("SELECT count() FROM u"))
+    s.query("DETACH TABLE t_renamed")
+    s.query("ATTACH TABLE t_renamed")
+    out.append(s.query("SELECT count() FROM t_renamed"))
+    return out
+
+
+def scenario_backup(s: stack.Server, p: str) -> list[str]:
+    s.query(f"CREATE TABLE t (k UInt64) ENGINE = MergeTree ORDER BY k SETTINGS storage_policy = '{p}'")
+    s.query("INSERT INTO t SELECT number FROM numbers(5000)")
+    name = uuid.uuid4().hex
+    s.query(f"BACKUP TABLE t TO Disk('backups_disk', '{name}')")
+    s.query("DROP TABLE t SYNC")
+    s.query(f"RESTORE TABLE t FROM Disk('backups_disk', '{name}')")
+    return [s.query("SELECT count(), sum(k) FROM t"), s.query(f"SELECT all(disk_name = '{DISKS[p]}') FROM system.parts WHERE table = 't' AND active")]
+
+
+def scenario_cache_and_encryption(s: stack.Server, p: str) -> list[str]:
+    s.query(f"CREATE TABLE t (k UInt64, v String) ENGINE = MergeTree ORDER BY k SETTINGS storage_policy = '{p}_encrypted'")
+    for i in range(3):
+        s.query(f"INSERT INTO t SELECT number + {i * 1000}, toString(number) FROM numbers(1000)")
+    s.query("OPTIMIZE TABLE t FINAL")
+    s.query("ALTER TABLE t UPDATE v = 'x' WHERE k % 7 = 0", settings={"mutations_sync": 2})
+    s.query("SYSTEM DROP FILESYSTEM CACHE")
+    return [s.query("SELECT count(), sum(k), countIf(v = 'x') FROM t"), check_table(s, "t")]
+
+
+def scenario_lightweight_update(s: stack.Server, p: str) -> list[str]:
+    s.query(f"""CREATE TABLE t (k UInt64, v UInt64) ENGINE = MergeTree ORDER BY k
+        SETTINGS storage_policy = '{p}', enable_block_number_column = 1, enable_block_offset_column = 1""")
+    s.query("INSERT INTO t SELECT number, number FROM numbers(10000)")
+    s.query("UPDATE t SET v = v * 10 WHERE k % 3 = 0")
+    out = [s.query("SELECT sum(v), count() FROM t")]
+    s.query("OPTIMIZE TABLE t FINAL")
+    out += [s.query("SELECT sum(v), count() FROM t"), check_table(s, "t")]
+    return out
+
+
+def scenario_backup_to_s3(s: stack.Server, p: str) -> list[str]:
+    s.query(f"CREATE TABLE t (k UInt64, v String) ENGINE = MergeTree ORDER BY k SETTINGS storage_policy = '{p}'")
+    s.query("INSERT INTO t SELECT number, toString(number) FROM numbers(5000)")
+    s.query("INSERT INTO t SELECT number + 5000, toString(number) FROM numbers(5000)")
+    url = f"{stack.S3_ENDPOINT}/{stack.S3_BUCKET}/feature-backups/{uuid.uuid4().hex}"
+    target = f"S3('{url}', '{stack.S3_ACCESS_KEY}', '{stack.S3_SECRET_KEY}')"
+    s.query(f"BACKUP TABLE t TO {target}")
+    s.query("DROP TABLE t SYNC")
+    s.query(f"RESTORE TABLE t FROM {target}")
+    return [s.query("SELECT count(), sum(k), max(v) FROM t"), check_table(s, "t")]
+
+
+def scenario_replicated(s: stack.Server, p: str) -> list[str]:
+    # Two replicas on one server fetch each other's parts over the interserver port. `inodedb` disks fetch whole
+    # parts, since zero-copy replication ships local metadata files.
+    for replica in ("r1", "r2"):
+        s.query(f"""CREATE TABLE t_{replica} (k UInt64, v String)
+            ENGINE = ReplicatedMergeTree('/features/{{database}}/t', '{replica}') ORDER BY k
+            SETTINGS storage_policy = '{p}', allow_remote_fs_zero_copy_replication = 1""")
+    s.query("INSERT INTO t_r1 SELECT number, toString(number) FROM numbers(1000)")
+    s.query("INSERT INTO t_r2 SELECT number + 1000, toString(number) FROM numbers(1000)")
+    s.query("SYSTEM SYNC REPLICA t_r1")
+    s.query("OPTIMIZE TABLE t_r1 FINAL", settings={"alter_sync": 2})
+    s.query("SYSTEM SYNC REPLICA t_r2")
+    out = []
+    for replica in ("r1", "r2"):
+        out += [s.query(f"SELECT count(), sum(k), max(v) FROM t_{replica}"),
+                s.query(f"SELECT name FROM system.parts WHERE table = 't_{replica}' AND active ORDER BY name"),
+                check_table(s, f"t_{replica}")]
+    return out
+
+
+def scenario_move_between_disks(s: stack.Server, p: str) -> list[str]:
+    if p != "s3_inodedb":
+        return ["skipped\n"]
+    s.query("CREATE TABLE t (k UInt64) ENGINE = MergeTree ORDER BY k SETTINGS storage_policy = 'tiered'")
+    s.query("INSERT INTO t SELECT number FROM numbers(1000)")
+    s.query("ALTER TABLE t MOVE PARTITION tuple() TO DISK 's3_inodedb'")
+    out = [s.query("SELECT disk_name, count() FROM system.parts WHERE table = 't' AND active GROUP BY disk_name")]
+    s.query("ALTER TABLE t MOVE PARTITION tuple() TO DISK 'default'")
+    out += [s.query("SELECT disk_name FROM system.parts WHERE table = 't' AND active ORDER BY disk_name"), s.query("SELECT sum(k) FROM t")]
+    return out
+
+
+SCENARIOS = {name[len("scenario_"):]: fn for name, fn in globals().items() if name.startswith("scenario_")}
+
+
+def run_scenario(s: stack.Server, name: str) -> tuple[bool, str]:
+    results = {}
+    for p in POLICIES:
+        db = f"{name}_{p}"
+        s.query(f"CREATE DATABASE {db}")
+        try:
+            results[p] = SCENARIOS[name](_InDatabase(s, db), p)
+        finally:
+            s.query(f"DROP DATABASE {db} SYNC")
+    if results["s3_local"] != results["s3_inodedb"] and name != "move_between_disks":
+        return False, f"local: {results['s3_local']}\ninodedb: {results['s3_inodedb']}"
+    return True, ""
+
+
+class _InDatabase:
+    """Runs every query of a scenario in its own database."""
+
+    def __init__(self, server: stack.Server, database: str):
+        self.server = server
+        self.database = database
+
+    def query(self, sql: str, settings: dict | None = None) -> str:
+        return self.server.query(sql, settings={"database": self.database, **(settings or {})})
+
+
+def main() -> int:
+    names = sys.argv[1:] or list(SCENARIOS)
+    server = make_server()
+    server.start()
+    failures = 0
+    try:
+        for name in names:
+            started = time.monotonic()
+            try:
+                ok, detail = run_scenario(server, name)
+            except Exception:  # noqa: BLE001
+                ok, detail = False, traceback.format_exc()
+            failures += not ok
+            print(f"{'PASS' if ok else 'FAIL'} {name} ({time.monotonic() - started:.1f} s)")
+            if detail:
+                print(detail)
+
+        # Data on the InodeDB disk survives a restart.
+        server.query("CREATE TABLE default.persist (k UInt64) ENGINE = MergeTree ORDER BY k SETTINGS storage_policy = 's3_inodedb'")
+        server.query("INSERT INTO default.persist SELECT number FROM numbers(12345)")
+        server.stop()
+        server.start()
+        ok = server.value("SELECT count() FROM default.persist") == "12345"
+        server.query("DROP TABLE default.persist SYNC")
+        failures += not ok
+        print(f"{'PASS' if ok else 'FAIL'} restart")
+
+        # Every blob goes once its tables are gone, on both disks.
+        for p in POLICIES:
+            left = stack.s3_objects(server.s3_prefixes[p])
+            ok = not left
+            failures += not ok
+            print(f"{'PASS' if ok else 'FAIL'} blobs removed on {p}" + ("" if ok else f": {len(left)} left, e.g. {left[:3]}"))
+    finally:
+        server.stop()
+    print(f"{failures} failed")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Builds ClickHouse from the submodule into build/ (or $BUILD_DIR), logging to build/build.log.
+# Arguments are ninja targets; the default is the server, `clickhouse`. Unit tests: `unit_tests_dbms`.
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+build=${BUILD_DIR:-$root/build}
+
+if [ ! -e "$root/ClickHouse/contrib/sysroot/.git" ]; then
+    (cd "$root/ClickHouse" && ./contrib/update-submodules.sh)
+fi
+
+if [ ! -f "$build/build.ninja" ]; then
+    CC=${CC:-clang-21} CXX=${CXX:-clang++-21} cmake -S "$root/ClickHouse" -B "$build" -G Ninja \
+        -DCMAKE_BUILD_TYPE="${BUILD_TYPE:-RelWithDebInfo}" \
+        -DCOMPILER_CACHE=ccache \
+        -DENABLE_TESTS=1 \
+        -DENABLE_RUST=0 \
+        -DENABLE_EMBEDDED_COMPILER=0
+fi
+
+if ! ninja -C "$build" "${@:-clickhouse}" > "$build/build.log" 2>&1; then
+    grep -E 'error:|FAILED' "$build/build.log" | head -40
+    exit 1
+fi

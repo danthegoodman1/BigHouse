@@ -1,3 +1,4 @@
-.idea
-.env
-*.conf
+/build/
+/.dev/
+__pycache__/
+/tmp/
