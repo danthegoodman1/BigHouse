@@ -6,7 +6,7 @@ The demo runs every part on one machine. In production each part runs on its own
 | --- | --- | --- |
 | Object storage | s3proxy | S3, with a prefix per disk |
 | Metadata | One InodeDB server | InodeDB with standbys; the disk's client follows a standby's `NotWriter` answer to the writer |
-| Writer | `demo-writer` | One per disk, under a supervisor that restarts it |
+| Writers | `demo-writer` | One exclusive writer per disk, or several shared ones, under a supervisor that restarts them and sends DDL through a brief exclusive writer |
 | Fleet servers | Slots on `127.0.0.1` | Fleet hosts, each running a pool of slots |
 | Query API | `bighouse/api.py`, one process | A scheduler that runs each query's steps as a durable workflow |
 
@@ -14,7 +14,7 @@ The demo runs every part on one machine. In production each part runs on its own
 
 An InodeDB key has a root, grants and an optional TTL. It mints keys only at or under its root, with grants and a TTL no wider than its own. A minted key expires with its minter at the latest, and revoking a key revokes every key it minted. InodeDB refuses a key once its TTL passes, by the clock of the server that checks it, and then deletes the key and the keys it minted.
 
-- **The writer's key:** `write`, rooted at the disk's directory, with no TTL. The writer that starts last owns the disk and fences out the one before it.
+- **Each writer's key:** `write`, rooted at the disk's directory, with no TTL. An exclusive writer that starts fences every other writer; shared writers commit side by side until one does. Give each shared writer a key of its own, so revoking one fences that writer alone.
 - **The scheduler's key:** `admin`, rooted at the tenant's directory or at the one that holds every tenant's. The keys it mints reach nothing outside that root, and revoking it revokes them all, which cuts off every fleet still running.
 - **Each query's key:** `read`, rooted at the disk's directory, with a TTL. The scheduler mints it as it assigns the servers and revokes it once they have stopped. The servers need it until then, to read and to release their InodeDB leases.
 
@@ -46,3 +46,25 @@ A workflow that resumes after a crash runs step 6 for the servers and key it rec
 - **One prefix per disk.** Fleet servers get read-only credentials scoped to it. Session credentials expire like the key (`<session_token>` on the disk).
 - **A lifecycle rule with `AbortIncompleteMultipartUpload`.** ClickHouse uploads large blobs in parts, and a crash mid-upload leaves parts that no listing shows.
 - **Uncommitted blobs.** BigHouse deletes only blobs that a commit freed. A writer that crashes or loses the disk leaves in S3 the blobs of parts it had not committed, a part waiting for the table's lock among them. `local` metadata leaves those of parts still being written.
+
+## Shared writers
+
+A disk with `<inodedb_writer_mode>shared</inodedb_writer_mode>` takes inserts and merges from several servers at once. Each shared writer inserts, merges and runs `OPTIMIZE`; it refuses DDL, mutations, lightweight updates and deletes, partition commands and `TRUNCATE`, naming exclusive mode. An exclusive writer, started for DDL and stopped after, fences every shared writer, and the supervisor restarts them once it stops; a restarted shared writer begins a new shared epoch. A shared writer leaves pending mutations to the next exclusive writer and merges around them, and the next exclusive writer also removes the source parts of merges whose writer died before `old_parts_lifetime` passed.
+
+Every table keeps its coordination files in InodeDB under `coord/`, beside the disk's `tree/`, at the table's data path:
+
+| Path | Holds |
+|---|---|
+| `coord/{table path}/block_number` | The table's highest committed block number, in decimal. Each insert's batch replaces it under its version. |
+| `coord/{table path}/tokens/{block id}` | A deduplication token: the name of the part that took the block. Each insert's batch creates it. |
+| `coord/{table path}/claims/{part name}` | A merge claim on a source part: `held {writer} {expiry ms} {result}` while the merge runs, then `done {writer} {result}`. |
+
+The files follow the table: `DROP TABLE` removes them in the batch that removes its directory, a table that changes its path (`RENAME TABLE` in an `Ordinary` database, `ATTACH TABLE ... FROM`) moves them, and `CREATE TABLE` removes any left at the new table's path. They hold plain text, so `idb cat` shows them as written.
+
+A control plane with a write key rooted at the disk's directory can manage claims through InodeDB:
+
+- **List** the merges in flight: `idb ls coord/{table path}/claims`, and `idb cat` each claim. Each shared writer logs its id at startup ("Began a shared epoch" or "Joined the shared writers").
+- **Reserve** parts for one writer: create `held {writer} {expiry ms} {result}` at each part's claim. Other writers leave those parts alone until the expiry, and the named writer may merge them.
+- **Revoke** a merge: replace or remove its `held` claims. Its writer's commit requires each claim's version, so it commits nothing, and its uploaded blobs stay in S3 as orphans.
+
+A `done` claim stays until its source part's directory is gone, and the merging writer removes it after the directory; touching one lets a writer with a stale view merge that source again, over the result. Expired `held` claims of dead writers go once another writer takes their parts over, or after twice the claim TTL.
