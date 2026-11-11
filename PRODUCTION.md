@@ -61,7 +61,7 @@ Every table keeps its coordination files in InodeDB under `coord/`, beside the d
 
 A control plane with a write key rooted at the disk's directory can manage claims through InodeDB:
 
-- **List** the merges in flight: `idb ls coord/{table path}/claims`, and `idb cat` each claim. Each writer logs its id at startup ("Joined the shared writers").
+- **List** the merges in flight: `idb ls coord/{table path}/claims`, and `idb cat` each claim. Each shared writer logs its id at startup ("Began a shared epoch" or "Joined the shared writers").
 - **Reserve** parts for one writer: create `held {writer} {expiry ms} {result}` at each part's claim. Other writers leave those parts alone until the expiry, and the named writer may merge them.
 - **Revoke** a merge: replace or remove its `held` claims. Its writer's commit requires each claim's version, so it commits nothing, and its uploaded blobs stay in S3 as orphans.
 

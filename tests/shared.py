@@ -21,6 +21,18 @@ Each scenario starts its own InodeDB root, runs an exclusive writer for the DDL,
 - `differential`: one workload through an exclusive writer and through shared writers gives equal answers for six
   engines.
 - `kill_loop`: SIGKILL random writers at random points for `--kill-rounds` rounds, then check every invariant.
+- `drop`: dropping a table removes its coordination files under `coord/`.
+
+Each hazard scenario runs twice, once with its protection and once with a failpoint that removes it, where the hazard
+must appear:
+
+- `reserved_number`: a block number taken before its part commits falls inside another writer's merge.
+- `listing`: a refresh whose listing pages at different versions misses a part and sees a later one.
+- `overlap`: a writer with a stale view merges parts another writer merged away.
+- `startup_cleanup`: a writer's startup cleanup runs during another writer's merge.
+- `lost_tokens`: a writer killed between its part's commit and its tokens' commit.
+- `view_retry`: a retry after a kill between a source table's commit and its view's.
+- `part_counts`: `parts_to_throw_insert` counts the parts of every writer.
 
     python3 tests/shared.py [scenario ...] [--kill-rounds N]
 """
@@ -722,7 +734,345 @@ def scenario_kill_loop(rounds: int) -> None:
     fresh_exclusive_check(run, "k", len(acknowledged) * 50)
 
 
-SCENARIOS = ["modes", "refused", "definition", "concurrent", "exactly_once", "merges", "leases", "mode_changes", "differential", "kill_loop"]
+def scenario_drop() -> None:
+    run = Run("drop")
+    run.exclusive("CREATE DATABASE s; CREATE TABLE s.t (k UInt64) ENGINE = MergeTree ORDER BY k SETTINGS non_replicated_deduplication_window = 100")
+    writer = run.server(1)
+    try:
+        writer.start()
+        for n in range(3):
+            writer.query(f"INSERT INTO s.t SELECT {n} * 10 + number FROM numbers(10)", settings={"insert_deduplication_token": f"drop-{n}"})
+        writer.query("OPTIMIZE TABLE s.t FINAL")
+        table_uuid = writer.value("SELECT uuid FROM system.tables WHERE database = 's' AND name = 't'")
+    finally:
+        run.stop_all()
+    coord = f"{run.root}/coord/store/{table_uuid[:3]}/{table_uuid}"
+    before = sorted(stack.idb("ls", coord).split())
+    tokens = stack.idb("ls", f"{coord}/tokens").split()
+    claims = stack.idb("ls", f"{coord}/claims").split()
+    check(before == ["block_number", "claims/", "tokens/"] and len(tokens) == 3 and len(claims) == 3,
+          "a table's counter, tokens and claims live under `coord/`", f"{before}, tokens {tokens}, claims {claims}")
+    run.exclusive("DROP TABLE s.t SYNC")
+    try:
+        left = stack.idb("ls", coord).split()
+    except subprocess.CalledProcessError:
+        left = []
+    check(not left, "dropping the table removes them", str(left))
+
+
+NO_BACKGROUND_MERGES = "max_bytes_to_merge_at_max_space_in_pool = 1, max_bytes_to_merge_at_min_space_in_pool = 1"
+
+
+class Background:
+    """A query on its own thread that keeps its error."""
+
+    def __init__(self, server: stack.Server, sql: str, settings: dict[str, object] | None = None):
+        self.error: str | None = None
+        self.thread = threading.Thread(target=self._run, args=(server, sql, settings or {}))
+        self.thread.start()
+
+    def _run(self, server: stack.Server, sql: str, settings: dict[str, object]) -> None:
+        try:
+            server.query(sql, settings=settings, timeout=120)
+        except (stack.QueryError, OSError) as error:
+            self.error = str(error)[:300]
+
+    def join(self) -> str | None:
+        self.thread.join()
+        return self.error
+
+
+def paused(server: stack.Server, failpoint: str, sql: str, settings: dict[str, object] | None = None) -> Background:
+    """Starts `sql` with `failpoint` paused, and returns once the query waits there."""
+    server.query(f"SYSTEM ENABLE FAILPOINT {failpoint}")
+    query = Background(server, sql, settings)
+    server.query(f"SYSTEM WAIT FAILPOINT {failpoint} PAUSE", timeout=60)
+    return query
+
+
+def fresh_value(run: Run, sql: str) -> str:
+    """What a new exclusive writer answers once it loads the disk."""
+    server = run.server(0, shared=False)
+    server.start()
+    try:
+        return server.value(sql)
+    finally:
+        server.stop()
+
+
+def part_dirs(run: Run, server: stack.Server, table: str) -> list[str]:
+    """The names in the directory of `s.{table}` in InodeDB, in its order: by bytes."""
+    table_uuid = server.value(f"SELECT uuid FROM system.tables WHERE database = 's' AND name = '{table}'")
+    return [name.rstrip("/") for name in stack.idb("ls", f"{run.root}/tree/store/{table_uuid[:3]}/{table_uuid}").splitlines()]
+
+
+def intersecting(names: list[str]) -> list[tuple[str, str]]:
+    """Pairs of part directories whose block ranges overlap while neither covers the other."""
+    parts = []
+    for name in names:
+        fields = name.split("_")
+        if len(fields) == 4 and all(field.isdigit() for field in fields[1:]):
+            parts.append((fields[0], int(fields[1]), int(fields[2]), name))
+    pairs = []
+    for i, (p1, lo1, hi1, n1) in enumerate(parts):
+        for p2, lo2, hi2, n2 in parts[i + 1:]:
+            overlap = p1 == p2 and lo1 <= hi2 and lo2 <= hi1
+            if overlap and not (lo1 <= lo2 and hi2 <= hi1) and not (lo2 <= lo1 and hi1 <= hi2):
+                pairs.append((n1, n2))
+    return pairs
+
+
+def active_parts(server: stack.Server, table: str) -> list[str]:
+    return server.query(f"SELECT name FROM system.parts WHERE database = 's' AND table = '{table}' AND active ORDER BY name").split()
+
+
+def scenario_reserved_number() -> None:
+    """Shared writers number a part in its own batch; `inodedb_shared_reserve_block_number` reserves the number in a
+    batch before it, which another writer's merge can then cover."""
+    for reserve in (False, True):
+        run = Run("reserved_number")
+        run.exclusive(f"CREATE DATABASE s; CREATE TABLE s.r (k UInt64) ENGINE = MergeTree ORDER BY k SETTINGS {NO_BACKGROUND_MERGES}")
+        a, b = run.server(1), run.server(2)
+        try:
+            a.start()
+            b.start()
+            b.query("INSERT INTO s.r SELECT number FROM numbers(100)")
+            if reserve:
+                a.query("SYSTEM ENABLE FAILPOINT inodedb_shared_reserve_block_number")
+            late = paused(a, "inodedb_insert_pause_before_commit", "INSERT INTO s.r SELECT number FROM numbers(100, 100)")
+            b.query("INSERT INTO s.r SELECT number FROM numbers(200, 100)")
+            b.query("OPTIMIZE TABLE s.r FINAL")
+            merged = active_parts(b, "r")
+            a.query("SYSTEM DISABLE FAILPOINT inodedb_insert_pause_before_commit")
+            error = late.join()
+            check(error is None, f"reserve={reserve}: the late insert returns", str(error))
+        finally:
+            run.stop_all()
+        if reserve:
+            rows = fresh_value(run, "SELECT count() FROM s.r")
+            check(rows == "200", "with its number reserved first, the late part lands inside the other writer's merge "
+                  "and its rows vanish", f"{rows} rows; the merge made {merged}")
+        else:
+            check(merged == ["all_1_2_1"], "the other writer merges the parts committed so far", str(merged))
+            fresh_exclusive_check(run, "r", 300)
+
+
+def scenario_listing() -> None:
+    """A refresh reads the counter, then lists, and merges only parts at or below the counter.
+    `inodedb_list_in_pages` lists one page per request, and `inodedb_shared_merge_past_refresh` lifts the limit."""
+    slow = ("<old_parts_lifetime>10</old_parts_lifetime><refresh_parts_interval>3600</refresh_parts_interval>"
+            "<merge_tree_clear_old_temporary_directories_interval_seconds>3600</merge_tree_clear_old_temporary_directories_interval_seconds>")
+    many = {"max_partitions_per_insert_block": 0}
+    for past_refresh in (False, True):
+        run = Run("listing", merge_tree=slow)
+        run.exclusive("CREATE DATABASE s; CREATE TABLE s.p (p UInt32, k UInt64) ENGINE = MergeTree PARTITION BY p ORDER BY k "
+                      f"SETTINGS {NO_BACKGROUND_MERGES}")
+        writer, merger = run.server(1), run.server(2)
+        try:
+            writer.start()
+            merger.start()
+            # Blocks 1 to 9 and 1034 to 1098 sort after partition 2, and blocks 11 to 1033 before it, so the first
+            # page of 1,024 names ends at `2_10_10_0`. Block 1099 sorts before that name, and block 1100 after it.
+            writer.query("INSERT INTO s.p SELECT 30000 + number, number FROM numbers(9)", settings=many)
+            writer.query("INSERT INTO s.p VALUES (2, 0)")
+            writer.query("INSERT INTO s.p SELECT 10000 + number, number FROM numbers(1023)", settings=many)
+            writer.query("INSERT INTO s.p SELECT 30009 + number, number FROM numbers(65)", settings=many)
+            names = part_dirs(run, writer, "p")
+            check(len(names) > 1024 and names[1023] == "2_10_10_0", f"past_refresh={past_refresh}: the first page of the listing "
+                  "ends at partition 2's first part", str(names[1020:1027]))
+            merger.query("SYSTEM ENABLE FAILPOINT inodedb_list_in_pages")
+            if past_refresh:
+                merger.query("SYSTEM ENABLE FAILPOINT inodedb_shared_merge_past_refresh")
+            optimize = paused(merger, "inodedb_list_pause_between_pages", "OPTIMIZE TABLE s.p PARTITION 2 FINAL")
+            writer.query("INSERT INTO s.p VALUES (2, 1)")
+            writer.query("INSERT INTO s.p VALUES (2, 2)")
+            merger.query("SYSTEM DISABLE FAILPOINT inodedb_list_pause_between_pages")
+            error = optimize.join()
+            merger.query("SYSTEM DISABLE FAILPOINT inodedb_list_in_pages")
+            merged = [name for name in active_parts(merger, "p") if name.startswith("2_")]
+        finally:
+            run.stop_all()
+        rows = fresh_value(run, "SELECT count() FROM s.p WHERE p = 2")
+        if past_refresh:
+            check(rows == "2", "without the limit, the merge covers the part the listing missed, and its rows vanish",
+                  f"{rows} rows; the merger held {merged}")
+        else:
+            check(error is None and rows == "3", "a merge limited to the counter read before the listing loses nothing",
+                  f"{error}; {rows} rows; the merger held {merged}")
+
+
+def scenario_overlap() -> None:
+    """A merge's claims stay `done` until their source directories are gone, so a writer with a stale view finds them.
+    `inodedb_shared_release_claims_at_commit` removes the claims when the merge commits, and the stale writer merges
+    over the other's result."""
+    small = ("<max_bytes_to_merge_at_max_space_in_pool>1000000</max_bytes_to_merge_at_max_space_in_pool>"
+             "<max_bytes_to_merge_at_min_space_in_pool>1000000</max_bytes_to_merge_at_min_space_in_pool>")
+    for release in (False, True):
+        run = Run("overlap")
+        run.exclusive("CREATE DATABASE s; CREATE TABLE s.o (k UInt64) ENGINE = MergeTree ORDER BY k")
+        # `a` merges parts under 1 MB alone, so it leaves block 1 out; `b` merges any.
+        a, b = run.server(1, merge_tree=small), run.server(2)
+        try:
+            a.start()
+            b.start()
+            for server in (a, b):
+                server.query("SYSTEM STOP MERGES s.o")
+            b.query("INSERT INTO s.o SELECT sipHash64(number) FROM numbers(1000000)")
+            b.query("INSERT INTO s.o SELECT number FROM numbers(10)")
+            time.sleep(2.5)
+            # `b` refreshed after block 2, so it may merge blocks 1 and 2, and from here its view stays as it is.
+            b.query("SYSTEM ENABLE FAILPOINT inodedb_shared_skip_refresh")
+            a.query("INSERT INTO s.o SELECT number FROM numbers(10, 10)")
+            if release:
+                a.query("SYSTEM ENABLE FAILPOINT inodedb_shared_release_claims_at_commit")
+            a.query("SYSTEM START MERGES s.o")
+            a.query("OPTIMIZE TABLE s.o")
+            check(wait_for(lambda: active_parts(a, "o") == ["all_1_1_0", "all_2_3_1"]), f"release={release}: `a` merges blocks 2 and 3",
+                  str(active_parts(a, "o")))
+            b.query("SYSTEM START MERGES s.o")
+            refusal = ""
+            try:
+                b.query("OPTIMIZE TABLE s.o", settings={"optimize_throw_if_noop": 1})
+            except stack.QueryError as error:
+                refusal = str(error)[:300]
+            if release:
+                wait_for(lambda: "all_1_2_1" in active_parts(b, "o"))
+            pairs = intersecting(part_dirs(run, a, "o"))
+        finally:
+            run.stop_all()
+        if release:
+            check(pairs == [("all_1_2_1", "all_2_3_1")], "without lasting claims, the stale writer's merge intersects the other's", str(pairs))
+        else:
+            check("Another writer holds a claim" in refusal and not pairs, "the stale writer finds the claims and merges nothing",
+                  f"{refusal}; {pairs}")
+            fresh_exclusive_check(run, "o", 1000020)
+
+
+def scenario_startup_cleanup() -> None:
+    """A starting writer removes temporary directories at once. Shared writers skip that cleanup, and
+    `inodedb_shared_startup_cleanup` runs it. A merge's directory reaches InodeDB only in the batch that renames it, so
+    the merge commits either way."""
+    for force in (False, True):
+        run = Run("startup_cleanup")
+        run.exclusive("CREATE DATABASE s; CREATE TABLE s.l (k UInt64) ENGINE = MergeTree ORDER BY k; SYSTEM STOP MERGES s.l; "
+                      + "; ".join(f"INSERT INTO s.l SELECT {n} * 100 + number FROM numbers(100)" for n in range(10)))
+        a, b = run.server(1), run.server(2)
+        try:
+            a.start()
+            b.start()
+            b.query("SYSTEM STOP MERGES s.l")
+            merge = pause_merge(a)
+            if force:
+                b.query("SYSTEM ENABLE FAILPOINT inodedb_shared_startup_cleanup")
+            b.query("DETACH TABLE s.l")
+            b.query("ATTACH TABLE s.l")
+            a.query("SYSTEM DISABLE FAILPOINT inodedb_merge_pause_before_commit")
+            merge.join()
+            parts = a.value("SELECT count(), uniqExact(_part) FROM s.l")
+            check(parts == "1000\t1", f"force={force}: a merge running while another writer starts commits", parts)
+        finally:
+            run.stop_all()
+        fresh_exclusive_check(run, "l", 1000)
+
+
+def scenario_lost_tokens() -> None:
+    """Tokens commit in their part's batch, so a writer killed after the part's commit leaves its tokens too.
+    `inodedb_tokens_after_part` commits them in a batch after the part's, and the test kills the writer in between."""
+    for after in (False, True):
+        run = Run("lost_tokens")
+        run.exclusive("CREATE DATABASE s; CREATE TABLE s.d (k UInt64) ENGINE = MergeTree ORDER BY k SETTINGS non_replicated_deduplication_window = 100")
+        a, b = run.server(1), run.server(2)
+        sql = "INSERT INTO s.d SELECT number FROM numbers(1000)"
+        settings = {"insert_deduplication_token": "lost-1"}
+        try:
+            a.start()
+            b.start()
+            if after:
+                a.query("SYSTEM ENABLE FAILPOINT inodedb_tokens_after_part")
+            insert = paused(a, "inodedb_insert_pause_before_tokens" if after else "inodedb_insert_pause_after_commit", sql, settings)
+            kill(a)
+            insert.join()
+            b.query(sql, settings=settings)
+        finally:
+            run.stop_all()
+        rows = fresh_value(run, "SELECT count() FROM s.d")
+        if after:
+            check(rows == "2000", "with tokens committed after their part, the retry commits the rows again", f"{rows} rows")
+        else:
+            check(rows == "1000", "with tokens in the part's batch, the retry after the kill adds nothing", f"{rows} rows")
+
+
+def scenario_view_retry() -> None:
+    """A source part and its view's part commit in separate batches, the source's first. A retry reaches the view
+    whether the source deduplicates or not, so the view's table needs tokens of its own: with them, a retry after a
+    kill between the commits fills in the view, and a retry after both adds nothing. The run without them sets the
+    view table's `non_replicated_deduplication_window` to 0."""
+    for window in (10000, 0):
+        run = Run("view_retry")
+        run.exclusive(VIEW_DDL.replace("SummingMergeTree ORDER BY w SETTINGS non_replicated_deduplication_window = 10000",
+                                       f"SummingMergeTree ORDER BY w SETTINGS non_replicated_deduplication_window = {window}"))
+        a, b = run.server(1), run.server(2)
+
+        def batch(n: int) -> tuple[str, dict[str, object]]:
+            return (f"INSERT INTO s.src SELECT 1, {n} * 1000000 + number, 'x' FROM numbers(1000)",
+                    {"insert_deduplication_token": f"view-{n}", "deduplicate_blocks_in_dependent_materialized_views": 1})
+
+        try:
+            a.start()
+            b.start()
+            # Killed between the source's commit and the view's.
+            insert = paused(a, "inodedb_insert_pause_after_commit", *batch(1))
+            kill(a)
+            insert.join()
+            b.query(batch(1)[0], settings=batch(1)[1])
+            # Retried after both committed.
+            b.query(batch(2)[0], settings=batch(2)[1])
+            b.query(batch(2)[0], settings=batch(2)[1])
+        finally:
+            run.stop_all()
+        counts = fresh_value(run, "SELECT (SELECT count() FROM s.src), (SELECT sum(c) FROM s.dst)")
+        if window:
+            check(counts == "2000\t2000", "with tokens in the view's table, each retry leaves every row once in the source and the view", counts)
+        else:
+            check(counts == "2000\t3000", "without them, the retry after both commits doubles the view's rows", counts)
+
+
+def scenario_part_counts() -> None:
+    """`parts_to_throw_insert` counts a writer's view of the parts, which a shared writer refreshes every second.
+    `inodedb_shared_skip_refresh` holds each view to the writer's own parts."""
+    for stale in (False, True):
+        run = Run("part_counts")
+        run.exclusive("CREATE DATABASE s; CREATE TABLE s.c (k UInt64) ENGINE = MergeTree ORDER BY k "
+                      f"SETTINGS {NO_BACKGROUND_MERGES}, parts_to_delay_insert = 20, parts_to_throw_insert = 20")
+        a, b = run.server(1), run.server(2)
+        try:
+            a.start()
+            b.start()
+            if stale:
+                for server in (a, b):
+                    server.query("SYSTEM ENABLE FAILPOINT inodedb_shared_skip_refresh")
+            for n in range(15):
+                a.query(f"INSERT INTO s.c SELECT {n} * 10 + number FROM numbers(10)")
+            time.sleep(2.5)
+            inserted, refusal = 0, ""
+            for n in range(10):
+                try:
+                    b.query(f"INSERT INTO s.c SELECT 1000 + {n} * 10 + number FROM numbers(10)")
+                    inserted += 1
+                except stack.QueryError as error:
+                    refusal = str(error)[:200]
+                    break
+        finally:
+            run.stop_all()
+        if stale:
+            check(inserted == 10, "with stale views, the writers commit 25 parts past a limit of 20", f"{inserted} inserts, {refusal}")
+        else:
+            check(inserted == 5 and "Too many parts" in refusal, "a writer counts the other's parts and refuses the 21st",
+                  f"{inserted} inserts, {refusal}")
+
+
+SCENARIOS = ["modes", "refused", "definition", "concurrent", "exactly_once", "merges", "leases", "mode_changes", "differential", "kill_loop", "drop",
+             "reserved_number", "listing", "overlap", "startup_cleanup", "lost_tokens", "view_retry", "part_counts"]
 
 
 def main() -> int:
