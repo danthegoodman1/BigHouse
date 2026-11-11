@@ -59,6 +59,8 @@ Every table keeps its coordination files in InodeDB under `coord/`, beside the d
 | `coord/{table path}/tokens/{block id}` | A deduplication token: the name of the part that took the block. Each insert's batch creates it. |
 | `coord/{table path}/claims/{part name}` | A merge claim on a source part: `held {writer} {expiry ms} {result}` while the merge runs, then `done {writer} {result}`. |
 
+The files follow the table: `DROP TABLE` removes them in the batch that removes its directory, a table that changes its path (`RENAME TABLE` in an `Ordinary` database, `ATTACH TABLE ... FROM`) moves them, and `CREATE TABLE` removes any left at the new table's path. They hold plain text, so `idb cat` shows them as written.
+
 A control plane with a write key rooted at the disk's directory can manage claims through InodeDB:
 
 - **List** the merges in flight: `idb ls coord/{table path}/claims`, and `idb cat` each claim. Each shared writer logs its id at startup ("Began a shared epoch" or "Joined the shared writers").
