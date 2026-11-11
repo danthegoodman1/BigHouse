@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Runs each feature on a disk with `local` metadata and on one with `inodedb` metadata, and requires the same
 answers from both. Then checks that data survives a restart, that an insert on the `inodedb` disk makes one InodeDB
-commit and a deduplicated one leaves no blob, and that every blob goes once its tables are gone. Needs
-`scripts/dev-up` and a built server.
+commit and a deduplicated one leaves no blob, that a renamed table keeps its tokens through a restart, and that every
+blob goes once its tables are gone. Needs `scripts/dev-up` and a built server.
 
     python3 tests/features.py [scenario ...]
 """
@@ -54,6 +54,7 @@ def make_server() -> stack.Server:
     <zookeeper><node><host>127.0.0.1</host><port>19181</port></node></zookeeper>""",
     )
     server.s3_prefixes = {"s3_local": f"features/{run}/local", "s3_inodedb": f"features/{run}/inodedb"}
+    server.inodedb_root = f"features/{run}"
     return server
 
 
@@ -167,6 +168,33 @@ def scenario_tables(s: stack.Server, p: str) -> list[str]:
     s.query("ATTACH TABLE t_renamed")
     out.append(s.query("SELECT count() FROM t_renamed"))
     return out
+
+
+def scenario_ordinary_rename(s: stack.Server, p: str) -> list[str]:
+    """A duplicate insert uses up a block number, a table renamed in an `Ordinary` database keeps its tokens, and a
+    new table at the old path starts with none."""
+    db = f"{s.database}_ordinary"
+    s.query(f"CREATE DATABASE {db} ENGINE = Ordinary", settings={"allow_deprecated_database_ordinary": 1})
+    try:
+        table = f"(k UInt64) ENGINE = MergeTree ORDER BY k SETTINGS storage_policy = '{p}', non_replicated_deduplication_window = 10"
+        s.query(f"CREATE TABLE {db}.t {table}")
+        s.query(f"SYSTEM STOP MERGES {db}.t")
+
+        def insert(name: str, k: int, token: str) -> None:
+            s.query(f"INSERT INTO {db}.{name} VALUES ({k})", settings={"insert_deduplication_token": token})
+
+        insert("t", 1, "a")
+        insert("t", 1, "a")
+        insert("t", 2, "b")
+        s.query(f"RENAME TABLE {db}.t TO {db}.t2")
+        insert("t2", 2, "b")
+        insert("t2", 3, "c")
+        s.query(f"CREATE TABLE {db}.t {table}")
+        insert("t", 1, "a")
+        parts = f"SELECT table, name FROM system.parts WHERE database = '{db}' AND active ORDER BY table, name"
+        return [s.query(f"SELECT k FROM {db}.t2 ORDER BY k"), s.query(f"SELECT k FROM {db}.t"), s.query(parts)]
+    finally:
+        s.query(f"DROP DATABASE {db} SYNC")
 
 
 def scenario_backup(s: stack.Server, p: str) -> list[str]:
@@ -326,6 +354,29 @@ def main() -> int:
               + ("" if ok else f": {rows} rows, {len(blobs)} blobs before, {len(left)} new: {left[:3]}"))
         server.query("DROP TABLE default.once SYNC")
 
+        # A table renamed in an `Ordinary` database moves its tokens with its directory and keeps them through a
+        # restart. `local` metadata's deduplication log keeps writing under the path it started with, so its restart
+        # forgets the tokens of inserts after the rename; this check runs on `inodedb` alone.
+        server.query("CREATE DATABASE renamed ENGINE = Ordinary", settings={"allow_deprecated_database_ordinary": 1})
+        server.query("CREATE TABLE renamed.t (k UInt64) ENGINE = MergeTree ORDER BY k "
+                     "SETTINGS storage_policy = 's3_inodedb', non_replicated_deduplication_window = 10")
+        server.query("INSERT INTO renamed.t VALUES (1)", settings={"insert_deduplication_token": "a"})
+        server.query("RENAME TABLE renamed.t TO renamed.t2")
+        server.query("INSERT INTO renamed.t2 VALUES (2)", settings={"insert_deduplication_token": "b"})
+        server.query("DETACH TABLE renamed.t2")
+        server.query("ATTACH TABLE renamed.t2")
+        for k, token in ((1, "a"), (2, "b")):
+            server.query(f"INSERT INTO renamed.t2 VALUES ({k})", settings={"insert_deduplication_token": token})
+        rows = server.value("SELECT count() FROM renamed.t2")
+        coord = f"{server.inodedb_root}/coord/data/renamed"
+        tables = stack.idb("ls", coord).split()
+        tokens = stack.idb("ls", f"{coord}/t2/tokens").split()
+        server.query("DROP DATABASE renamed SYNC")
+        ok = rows == "2" and tables == ["t2/"] and len(tokens) == 2
+        failures += not ok
+        print(f"{'PASS' if ok else 'FAIL'} a renamed table keeps its tokens through a restart"
+              + ("" if ok else f": {rows} rows, {tables} under coord, {len(tokens)} tokens"))
+
         # Every blob goes once its tables are gone, on both disks.
         for p in POLICIES:
             left = stack.s3_objects(server.s3_prefixes[p])
@@ -334,6 +385,12 @@ def main() -> int:
             print(f"{'PASS' if ok else 'FAIL'} blobs removed on {p}" + ("" if ok else f": {len(left)} left, e.g. {left[:3]}"))
     finally:
         server.stop()
+
+    # The disk frees coordination files, which hold plain text, without taking them for values of its own.
+    foreign = [line for line in server.log.read_text(errors="replace").splitlines() if "holds no InodeDB metadata value" in line]
+    ok = not foreign
+    failures += not ok
+    print(f"{'PASS' if ok else 'FAIL'} freed coordination files log no error" + ("" if ok else f": {len(foreign)}, e.g. {foreign[0][:200]}"))
     print(f"{failures} failed")
     return 1 if failures else 0
 

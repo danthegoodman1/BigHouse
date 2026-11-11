@@ -1,6 +1,6 @@
 # Benchmarks
 
-Two benchmarks ran on the machine below: `demo/bench` times queries through the query API at each fleet size, and `tests/bench.py` compares `inodedb` metadata with `local`.
+Two benchmarks ran on the machine below: `demo/bench` times queries through the query API at each fleet size, and `tests/bench.py` compares `inodedb` metadata with `local` and measures shared writers.
 
 ## Machine
 
@@ -70,3 +70,37 @@ The inserts and the cold starts run 3 rounds, with the disks in a different orde
 - **Inline files make cold starts faster.** Loading a part reads its small files, which `inodedb` keeps inline: 10,000 parts load from 20,283 InodeDB reads and 1,411 S3 reads in 1.3 s, where `local` makes 101,939 S3 reads in 2.3 s. With inline files off, the load reads both and takes 2.6 s.
 - **Small parts upload nothing.** Every file of a 1,000-row part fits within `inodedb_inline_file_max_bytes` (16 KiB), so `inodedb` writes no S3 objects for it.
 - The `local` rows' InodeDB reads come from the server's two other disks, which start with it.
+
+## Shared writers
+
+`tests/bench.py --shared` starts 8 servers with `inodedb_writer_mode` = `shared` on one disk, after an exclusive writer has created the tables. Then 1, 2, 4 and 8 of them insert at once, each from one thread, 200 inserts of 1,000 rows apiece, into one table or into a table each, with merges stopped. A retry is an insert's batch that found another writer's part at its block number and went again with the next number; commits per insert count every batch sent. 3 rounds; the tables give medians.
+
+### InodeDB on the NVMe drive
+
+`python3 tests/bench.py --shared`
+
+| Writers | One table: inserts/s | Retries per insert | Commits per insert | A table each: inserts/s | Commits per insert |
+| --: | --: | --: | --: | --: | --: |
+| 1 | 116 | 0.00 | 1.00 | 120 | 1.00 |
+| 2 | 175 | 0.98 | 1.97 | 194 | 1.00 |
+| 4 | 172 | 2.87 | 3.86 | 367 | 1.00 |
+| 8 | 171 | 6.55 | 7.54 | 657 | 1.00 |
+
+### InodeDB on tmpfs
+
+`python3 tests/bench.py --shared --tmpfs`
+
+| Writers | One table: inserts/s | Retries per insert | Commits per insert | A table each: inserts/s | Commits per insert |
+| --: | --: | --: | --: | --: | --: |
+| 1 | 305 | 0.00 | 1.00 | 364 | 1.00 |
+| 2 | 665 | 0.99 | 1.18 | 686 | 1.00 |
+| 4 | 1,110 | 1.45 | 1.30 | 1,102 | 1.00 |
+| 8 | 1,135 | 4.57 | 4.36 | 1,676 | 1.00 |
+
+### Reading the numbers
+
+- **A table each scales with the writers.** Each table has its own counter, so no insert retries: 8 writers take 657 inserts a second on the drive and 1,676 on tmpfs, 5.5 and 4.6 times one writer.
+- **One table's writers take turns at its counter.** Each insert's batch replaces the table's counter under the version it read, so of the writers that read one value, one commits and the others retry with the next number. On the drive, one table holds near 172 inserts a second from 2 writers to 8, while each insert retries 6.55 times at 8, and each retry waits for a sync. One exclusive writer takes about as many from 8 threads (164 to 193 across runs), because there the table's parts lock orders the commits.
+- **Faster syncs raise that limit.** On tmpfs, one table takes 1,110 inserts a second from 4 writers and 1,135 from 8. There, retries exceed the extra commits, because a writer that finds another's part at its number moves on before it sends a batch.
+- **One writer shows the noise.** A single writer runs the same work in both layouts: 116 and 120 inserts a second on the drive, 305 and 364 on tmpfs. An exclusive writer's one thread falls in that range, at 125 and 343.
+
