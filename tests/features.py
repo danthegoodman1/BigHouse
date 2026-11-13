@@ -272,6 +272,36 @@ def scenario_move_between_disks(s: stack.Server, p: str) -> list[str]:
     return out
 
 
+def scenario_wide_part(s: stack.Server, p: str) -> list[str]:
+    # 800 columns of hashes make a Wide part of 1,600 files of 12 KB. Each file is small enough to inline, and
+    # together they hold 9.6 MB, more than one InodeDB commit takes.
+    columns = 800
+    s.query(f"CREATE TABLE t (k UInt64, {', '.join(f'c{i} UInt64 DEFAULT sipHash64(k, {i})' for i in range(columns))}) "
+            f"ENGINE = MergeTree ORDER BY k "
+            f"SETTINGS storage_policy = '{p}', min_bytes_for_wide_part = 0, min_rows_for_wide_part = 0")
+    s.query("INSERT INTO t (k) SELECT number FROM numbers(1500)")
+    sums = ", ".join(f"sum(c{i})" for i in range(0, columns, 100))
+    return [s.query(f"SELECT count(), sum(k), {sums} FROM t"),
+            s.query("SELECT part_type, count() FROM system.parts WHERE table = 't' AND active GROUP BY part_type"),
+            check_table(s, "t")]
+
+
+def scenario_sparse_wide_part(s: stack.Server, p: str) -> list[str]:
+    # The shape of `system.query_metric_log`: 1,728 counters of long names, each zero in most rows. Each column is
+    # sparse and writes 4 files, so the part holds about 6,900 files: more than one InodeDB commit takes beside their
+    # inline content.
+    columns = 1728
+    s.query(f"CREATE TABLE t (k UInt64, "
+            f"{', '.join(f'ProfileEvent_CounterInAWideTableOfMetrics{i:04d} UInt64 DEFAULT if(sipHash64(k, {i}) % 32 = 0, sipHash64(k, {i}) % 100000, 0)' for i in range(columns))}) "
+            f"ENGINE = MergeTree ORDER BY k "
+            f"SETTINGS storage_policy = '{p}', min_bytes_for_wide_part = 0, min_rows_for_wide_part = 0")
+    s.query("INSERT INTO t (k) SELECT number FROM numbers(16000)")
+    sums = ", ".join(f"sum(ProfileEvent_CounterInAWideTableOfMetrics{i:04d})" for i in range(0, columns, 200))
+    return [s.query(f"SELECT count(), sum(k), {sums} FROM t"),
+            s.query("SELECT part_type, count(), sum(files) > 6000 FROM system.parts WHERE table = 't' AND active GROUP BY part_type"),
+            check_table(s, "t")]
+
+
 SCENARIOS = {name[len("scenario_"):]: fn for name, fn in globals().items() if name.startswith("scenario_")}
 
 
@@ -377,9 +407,12 @@ def main() -> int:
         print(f"{'PASS' if ok else 'FAIL'} a renamed table keeps its tokens through a restart"
               + ("" if ok else f": {rows} rows, {tables} under coord, {len(tokens)} tokens"))
 
-        # Every blob goes once its tables are gone, on both disks.
+        # Every blob goes once its tables are gone, on both disks. The disk removes a dropped table's blobs in the
+        # blob killer's rounds, as it claims their files from InodeDB.
         for p in POLICIES:
-            left = stack.s3_objects(server.s3_prefixes[p])
+            deadline = time.monotonic() + 60
+            while (left := stack.s3_objects(server.s3_prefixes[p])) and time.monotonic() < deadline:
+                time.sleep(1)
             ok = not left
             failures += not ok
             print(f"{'PASS' if ok else 'FAIL'} blobs removed on {p}" + ("" if ok else f": {len(left)} left, e.g. {left[:3]}"))

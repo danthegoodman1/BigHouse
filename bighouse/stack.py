@@ -248,11 +248,9 @@ class Server:
         shutil.rmtree(self.dir, ignore_errors=True)
 
     def query(self, sql: str, settings: dict[str, object] | None = None, timeout: float = 600) -> str:
-        params = {"query": sql}
-        for key, value in (settings or {}).items():
-            params[key] = str(value)
-        url = f"http://127.0.0.1:{self.http_port}/?" + urllib.parse.urlencode(params)
-        request = urllib.request.Request(url, data=b"", method="POST")
+        # The query goes in the body, which holds a table of thousands of columns.
+        url = f"http://127.0.0.1:{self.http_port}/?" + urllib.parse.urlencode({key: str(value) for key, value in (settings or {}).items()})
+        request = urllib.request.Request(url, data=sql.encode(), method="POST")
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 return response.read().decode()
