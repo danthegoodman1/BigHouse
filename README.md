@@ -2,7 +2,7 @@
 
 BigHouse runs ClickHouse like BigQuery. Writers ingest into `MergeTree` tables on S3, one alone or several side by side, and each query runs on a fleet of ClickHouse servers that read those tables as parallel replicas, answer, and make way for fresh ones. It rests on `inodedb`, a new `metadata_type` for ClickHouse's object-storage disks that keeps the disk's file tree in [InodeDB](https://github.com/danthegoodman1/inodedb), a transactional tree of inodes, and its blobs in S3. Any number of servers read the disk while its writers change it, and a fleet needs nothing from them, so queries keep answering while they are down. The disk's code lives on the `bighouse` branch of a [fork of ClickHouse 26.10](https://github.com/danthegoodman1/ClickHouse/tree/bighouse), which this repo pins as its `ClickHouse/` submodule, and a Python service with no dependencies runs the fleets.
 
-The disk matches an S3 disk with `local` metadata feature for feature. Of ClickHouse's 17,275 stateless tests, the five that fail only on `inodedb` read local metadata files, and pass once pointed at InodeDB's tree. Small files live in InodeDB, so 10,000 parts load in 1.29 s from 1,411 S3 reads, where `local` takes 2.30 s and 101,939 reads. A query that turns eight blank servers into the tenant's replicas and runs on them answers in 138 ms. [BENCHMARKS.md](BENCHMARKS.md) has every result and the commands to reproduce them.
+The disk matches an S3 disk with `local` metadata feature for feature. Of ClickHouse's 17,275 stateless tests, the five that fail only on `inodedb` read local metadata files, and pass once pointed at InodeDB's tree. Small files live in InodeDB, so 10,000 parts load in 1.26 s from 1,553 S3 reads, where `local` takes 2.29 s and 102,011 reads. A query that turns eight blank servers into the tenant's replicas and runs on them answers in 138 ms. [BENCHMARKS.md](BENCHMARKS.md) has every result and the commands to reproduce them.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/fleet-dark.png">
@@ -54,32 +54,32 @@ The disk against `local` metadata, one of each on the same server and s3proxy, m
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/metadata-dark.png">
-  <img src="docs/images/metadata-light.png" alt="Cold start of 10,000 parts: 2.30 s on local metadata, 1.29 s on inodedb with InodeDB on the NVMe drive, 1.23 s with InodeDB on tmpfs. S3 reads at that start: 101,939, 1,411 and 1,822. Inserts a second on one thread: 325 on local metadata, 325 with fsync on, 131 on inodedb with InodeDB on the drive, 337 with InodeDB on tmpfs, and 35 on the server's own drive with fsync on. On eight threads: 1,374, 1,356, 189, 1,383 and 84.">
+  <img src="docs/images/metadata-light.png" alt="Cold start of 10,000 parts: 2.29 s on local metadata, 1.26 s on inodedb with InodeDB on the NVMe drive, 1.23 s with InodeDB on tmpfs. S3 reads at that start: 102,011, 1,553 and 1,822. Inserts a second on one thread: 327 on local metadata, 327 with fsync on, 186 on inodedb with InodeDB on the drive, 337 with InodeDB on tmpfs, and 35 on the server's own drive with fsync on. On eight threads: 1,410, 1,434, 331, 1,383 and 84.">
 </picture>
 
 Inserts a second into one table, 1,000 rows and one part per insert. Fsync on sets `fsync_after_insert` and `fsync_part_directory`.
 
 | Inserts into | Each insert syncs | 1 thread | 8 threads |
 |---|---|--:|--:|
-| S3, `local` metadata | nothing | 325 | 1,374 |
-| S3, `local` metadata, fsync on | nothing | 325 | 1,356 |
-| S3, `inodedb`, InodeDB on the NVMe drive | one InodeDB commit | 131 | 189 |
+| S3, `local` metadata | nothing | 327 | 1,410 |
+| S3, `local` metadata, fsync on | nothing | 327 | 1,434 |
+| S3, `inodedb`, InodeDB on the NVMe drive | one InodeDB commit | 186 | 331 |
 | S3, `inodedb`, InodeDB on tmpfs | one InodeDB commit | 337 | 1,383 |
 | The server's own drive, fsync on | 14 files and directories | 35 | 84 |
 
-An `inodedb` insert is durable when it returns: it makes one InodeDB commit, which waits for the store's sync. `local` metadata writes its files without syncing them, and on an object-storage disk the fsync settings sync nothing, so its two rows make the same calls. A durable insert without InodeDB means MergeTree on the server's own drive with both settings on, which syncs 14 files and directories per insert. One table commits its new parts one at a time, so on a drive whose sync takes 2 ms a table takes about 190 inserts a second however many threads insert. With syncs that take microseconds, as on datacenter NVMe with power-loss protection, `inodedb` matches `local`. tmpfs stands in for such a drive here.
+An `inodedb` insert is durable when it returns: it makes one InodeDB commit, which waits for the store's sync. `local` metadata writes its files without syncing them, and on an object-storage disk the fsync settings sync nothing, so its two rows make the same calls. A durable insert without InodeDB means MergeTree on the server's own drive with both settings on, which syncs 14 files and directories per insert. One table commits its new parts one at a time, so on a drive whose sync takes 2 ms a table takes about 330 inserts a second however many threads insert. With syncs that take microseconds, as on datacenter NVMe with power-loss protection, `inodedb` matches `local`. tmpfs stands in for such a drive here.
 
 | | `local` | `inodedb`, InodeDB on NVMe | `inodedb`, InodeDB on tmpfs |
 |---|--:|--:|--:|
-| 10,000 parts written | 7.0 s | 50.4 s | 5.6 s |
-| Cold start, 10,000 parts | 2.30 s | 1.29 s | 1.23 s |
-| S3 reads at that start | 101,939 | 1,411 | 1,822 |
+| 10,000 parts written | 14.0 s | 28.1 s | 5.6 s |
+| Cold start, 10,000 parts | 2.29 s | 1.26 s | 1.23 s |
+| S3 reads at that start | 102,011 | 1,553 | 1,822 |
 
 ### Trade-offs
 
-- **Insert rate on slow syncs.** On this drive one table takes 131 durable inserts a second on one thread, against `local`'s 325 unsynced ones, and 10,000 parts take 50 s against 7.0 s. Larger inserts, or `async_insert`, write fewer parts.
+- **Insert rate on slow syncs.** On this drive one table takes 186 durable inserts a second on one thread, against `local`'s 327 unsynced ones, and 10,000 parts take 28 s against `local`'s 6 to 14 s across runs. Larger inserts, or `async_insert`, write fewer parts.
 - **One table's inserts commit in turn.** Each part commits under the table's parts lock, which orders a table's new parts. With fast syncs, the part's batch sets the pace: on tmpfs, 8 threads insert 1,383 times a second against 337 on one.
-- **Shared writers of one table retry on its counter.** Of the writers that read the same block number counter, one commits and the others retry with the next number. On this drive one table takes about 172 inserts a second from 2 writers to 8, where 8 writers with a table each take 657 ([BENCHMARKS.md](BENCHMARKS.md#shared-writers)).
+- **Shared writers of one table retry on its counter.** Of the writers that read the same block number counter, one commits and the others retry with the next number. On this drive one table takes about 305 inserts a second from 2 writers to 8, where 8 writers with a table each take 802 ([BENCHMARKS.md](BENCHMARKS.md#shared-writers)).
 - **Schema changes need an exclusive writer.** Shared writers insert and merge. `ALTER`, mutations, partition operations, `TRUNCATE`, and `CREATE`, `DROP` or `RENAME` go through an exclusive writer, which fences the shared ones while it holds the disk.
 - **One query per fleet server.** A config reload can add a disk but cannot remove one or change its key, so each server serves one query and is then replaced. Back to back on 8 slots, fleets of 4 average 276 ms a query against 126 ms with the pool settled, because each waits for servers still booting.
 - **Schema changes reach the next fleet.** Each fleet reads the schema as it attaches. A long-lived replica keeps the schema it attached with.
