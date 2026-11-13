@@ -160,6 +160,7 @@ The disk lives under the key's root. A write key makes a writer, and a read key,
 | `inodedb_claim_ttl_ms` | 60 s | How long a shared writer's merge claim lasts unless renewed; renewals come every third of it |
 | `inodedb_deduplication_token_ttl_seconds` | 1 h | How long shared writers keep a deduplication token; an exclusive writer keeps `non_replicated_deduplication_window` tokens |
 | `inodedb_inline_file_max_bytes` | 16 KiB | Keep files up to this size in InodeDB, with no blob |
+| `inodedb_commit_max_bytes` | 6 MiB | Keep one commit within this size, counting its inline files and 1.5 KiB for each operation; the commit writes its largest inline files to blobs to fit, so one InodeDB commit holds a part of about 7,400 files |
 | `inodedb_spill_threshold` | 32 KiB | Move a file's record larger than this to a blob of its own |
 | `inodedb_lease_lag_ms` | 10 min | How long a replica's lease holds blobs it may still read |
 | `inodedb_cache_bytes` | 256 MiB | What the metadata cache holds |
