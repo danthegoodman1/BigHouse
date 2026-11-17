@@ -17,7 +17,7 @@ A disk has one exclusive writer, or several shared writers that insert and merge
 | `inodedb/` | Submodule: InodeDB. The client's `proto/inodedb.proto` copies its API as of `dc97a2c`; the pinned `eeca4a0` adds `ListFreed`, which the disk leaves uncalled. |
 | `scripts/` | `clickhouse-build`, `inodedb-build`, `dev-up`, `dev-down`. |
 | `bighouse/` | `stack.py` (keys, disk configs, servers), `catalog.py` (the writer's databases in InodeDB), `fleet.py` (slots, the pool of blank servers, and fleets), `api.py` (the query API). |
-| `tests/` | `features.py`, `crash.py`, `claims.py`, `fence.py`, `replicas.py`, `discovery.py`, `parity.py`, `bench.py`, `shared.py`. |
+| `tests/` | `features.py`, `crash.py`, `claims.py`, `fence.py`, `replicas.py`, `discovery.py`, `parity.py`, `bench.py`, `shared.py`, `wide.py`, `startup.py`. |
 | `demo/` | `up`, `down`, `load`, `bench`, `e2e.py`. |
 | `docs/images/` | The README's charts: `charts.html` holds their data, and `render.sh` renders them. |
 
@@ -59,8 +59,10 @@ A disk has one exclusive writer, or several shared writers that insert and merge
 | `src/Storages/MergeTree/MergePlainMergeTreeTask.cpp` | A shared writer's merge takes a temporary directory named with its writer id and commits through `commitSharedMergedPart`. | Merge claims. |
 | `src/Storages/MergeTree/MergeTreeCleanupThread.cpp` | A shared writer expires tokens and sweeps claims in place of clearing mutations, empty parts and patch parts. | Cleanup in shared mode. |
 | `src/Storages/MergeTree/Compaction/MergePredicates/MergeTreeMergePredicate.cpp` | `canUsePartInMerges` asks `StorageMergeTree::sharedWriterCannotMerge`. | A merge takes only parts the last refresh saw complete and that no other writer claimed. |
+| `src/Disks/DiskObjectStorage/ObjectStorages/ObjectStorageFactory.cpp`, `src/Disks/DiskObjectStorage/ObjectStorages/S3/S3ObjectStorage.{h,cpp}` | `S3ClientOnFirstUse` holds the storage's client, and the factory gives an `inodedb` disk a way to build one in place of a client. `startup`, `shutdown`, `tryGetS3StorageClient` and the client rebuild of a config reload build none. | A process that reads and writes no blob builds no S3 client. |
+| `contrib/grpc-cmake/CMakeLists.txt`, `contrib/grpc-cmake/event_engine_threads.cc`, `contrib/grpc-cmake/include/grpc_event_engine_threads.h` | `grpcSetEventEngineReserveThreads`, compiled into gRPC's library, where `PosixEventEngine::Options` is in reach; its header joins gRPC's include path. | `inodedb_grpc_threads`: gRPC's public headers name no thread count. |
 | `src/Disks/tests/gtest_metadata_local_disk.cpp` | Runs every case against `local` and `inodedb`, plus `inodedb`-only inline, spill and replica cases. | Unit parity. |
-| `src/Disks/tests/gtest_disk_object_storage.cpp` | `InodeDBCommitWritesInlineFilesPastItsLimitToBlobs`, `InodeDBTransactionPastOneCommitCommitsInStages`, `InodeDBTransactionWithinOneCommitTakesOne`, `InodeDBStagedTransactionFailsOnceItsDirectoryChanges` and `InodeDBUndoLeavesTheBlobsOfCommittedStages`. | A commit past InodeDB's limit, and a transaction past one commit. |
+| `src/Disks/tests/gtest_disk_object_storage.cpp` | `InodeDBCommitWritesInlineFilesPastItsLimitToBlobs`, `InodeDBTransactionPastOneCommitCommitsInStages`, `InodeDBTransactionWithinOneCommitTakesOne`, `InodeDBStagedTransactionFailsOnceItsDirectoryChanges` and `InodeDBUndoLeavesTheBlobsOfCommittedStages`, `InodeDBRefusesFewerThanThreeGrpcThreads` and `InodeDBDiskBuildsItsS3ClientOnFirstUse`. | A commit past InodeDB's limit, and a transaction past one commit. |
 | `src/Disks/tests/gtest_inodedb_client.cpp` | The client's standby redirect and retried commit, through a fault-injecting proxy. | Client behavior on failover and lost answers. |
 
 ## Testing Strategy
@@ -72,6 +74,7 @@ A disk has one exclusive writer, or several shared writers that insert and merge
 - **Replicas.** `tests/replicas.py`: a writer and a replica; new parts appear, drops vanish, and queries outlive the writer's cleanup.
 - **Shared writers.** `tests/shared.py`: one scenario per Phase 7 gate, a kill loop, and one per hazard, which runs once with its protection and once with a failpoint that removes it, where the hazard must appear.
 - **Large parts.** `tests/wide.py`: parts of 10,000 to 41,000 files through inserts, merges and a mutation, on an exclusive writer and on shared writers; a kill after each stage; another writer's cleanup and a new exclusive writer between two stages.
+- **Fresh processes.** `tests/startup.py`: a server whose only disk is `inodedb` builds no S3 client until its first blob, through its start, a config reload and a restart, and `inodedb_grpc_threads` sets the threads gRPC's pool keeps, counted by stack in `system.stack_trace`. libch's `operations` benchmark measures the forked insert the changes serve.
 - **End to end.** `demo/e2e.py`: the query API returns the writer's answers at fleet sizes 1, 2, 4 and 8, and replaces each fleet's servers with blank ones.
 - **Benchmarks.** `tests/bench.py` against `local` metadata, with InodeDB's store on the drive and on tmpfs (`--tmpfs`), and `demo/bench` for the query API at each fleet size, recorded in `BENCHMARKS.md`.
 - **CI.** GitHub Actions will download prebuilt ClickHouse binaries for the pinned fork commit, run s3proxy and InodeDB, and run the suites, with the full stateless parity run on demand. A hosted runner takes hours to build ClickHouse, so CI waits for those binaries.
@@ -439,3 +442,40 @@ Status ledger:
 | Complete | Test | Each new test without its protection | On fork `51ceddb9a`, `tests/wide.py exclusive` and `kills` fail at the insert of 1,024 paths with `too-many-ops`, and the other scenarios stop at the failpoint this phase adds (`build/test_wide_prefix_51ceddb9a.log`). Built without the touch that opens each later batch, gtest `InodeDBStagedTransactionFailsOnceItsDirectoryChanges` fails: the last commit after the directory is removed and made again goes through and publishes a directory that lacks a stage, and the two other cases fail with `FILE_DOESNT_EXIST` in place of `ABORTED` (`build/test_staged_gtest_unguarded.log`). |
 | Complete | Doc | 8G: Docs | `README.md`: the commit paragraph, `inodedb_commit_max_bytes`, uncommitted blobs and the suite list; `PRODUCTION.md`: uncommitted blobs. |
 
+## Phase 9: What a Fresh Process Pays
+
+Goal:
+A process that attaches an `inodedb` disk for one small insert pays for the insert. libch forks a worker for each operation, and its gate for a 1,000-row insert through a projection and a view is 15 ms of CPU and 20 ms from call to answer (libch issue #1). Such an insert took 16.0 to 16.5 ms of CPU and 23 to 26 ms: the disk built an S3 client the insert never used, gRPC started a thread for each core, and the first wait on one of gRPC's locks slept 3 ms.
+
+Scope:
+- 9A: The S3 client on first use. An `inodedb` disk keeps small files in InodeDB, so it builds its S3 client with its first blob read, write or delete, once, whichever thread comes first. A server's start, its metrics and a config reload build none.
+- 9B: `inodedb_grpc_threads`, the threads gRPC's event engine keeps while idle, for the whole process. gRPC keeps one for each core, between 4 and 16, and starts them with its first channel. The engine's timer and its poller each hold one, and it starts at most one more a second, so the disk refuses 1 and 2.
+- 9C: The CPU clock at startup. The first wait on an abseil mutex in a process measures the CPU's clock frequency across sleeps of 1 and 2 ms, where the kernel exports no `tsc_freq_khz`. A process measures it as it registers the `inodedb` metadata type, and a process forked from it inherits the result.
+- 9D: Gtests and `tests/startup.py`.
+- 9E: `README.md` and `PRODUCTION.md`.
+
+Out of scope:
+- The store's commit time. An insert through a view commits twice, and each commit took 3.9 to 4.1 ms on the dev drive.
+- libch's side: its worker sets `inodedb_grpc_threads`, and its `BENCHMARKS.md` records the gate.
+
+Completion gate:
+Through libch's forking worker, the insert costs at most 15 ms of CPU and 20 ms from call to answer at 10, 100, 500 and 10,000 parts a table, by libch's record. BigHouse's suites and the stateless parity run pass, and `tests/bench.py` keeps its insert rates.
+
+Testing plan:
+- Gtests: a disk refuses 1 and 2 gRPC threads and attaches with 3; a disk on S3 commits and reads an inline file without a client, and 16 threads asking at once build one.
+- `tests/startup.py`: `s3_client` and `grpc_threads`.
+- The forked insert and merge of libch's `operations` benchmark, with each change switched call by call on one tenant and one forking parent.
+- The gtests, wide, features, fence, replicas, discovery, crash, claims, shared and parity suites, `demo/e2e.py` and `tests/bench.py`.
+
+Status ledger:
+
+| Status | Type | Item | Evidence / Gap |
+| --- | --- | --- | --- |
+| Complete | Work | 9A: S3 client on first use | Fork `71a2c6464`: `S3ClientOnFirstUse` in `S3ObjectStorage.h`; `registerS3ObjectStorage` gives a disk whose `metadata_type` is `inodedb` a way to build its client; `S3ObjectStorage::startup`, `shutdown` and `tryGetS3StorageClient` take the client only if it is built, and `applyNewSettings` replaces the way to build one where none is built. A server's metrics thread asks each disk for its client's throttlers as it starts, and every config reload rebuilds each disk's client (`build/test_startup_1.log`: on `3ef1e9ead`, which held only the factory's change, a starting server counted one `S3Clients`). In the forked insert the change takes 0.3 to 0.4 ms of CPU (`build/gate_loop_1.log`, `build/gate_loop_500.log`). |
+| Complete | Work | 9B: `inodedb_grpc_threads` | `contrib/grpc-cmake/event_engine_threads.cc` sets gRPC's event engine factory to `PosixEventEngine::MakePosixEventEngine` with `reserve_threads`; `InodeDB::Client` calls it before its first channel, and `registerMetadataStorageFromInodeDB` refuses 1 and 2. Measured through libch's forked insert, 30 calls a variant (`build/gate_loop_1.log`): 4 threads take 1.8 ms of CPU off 16.3 ms, and 3 threads 0.3 ms more; at 2 every call waited 1,035 ms for the engine's next thread (`build/gate_loop_g2.log`). gRPC's own floor is 4, so libch sets 4. |
+| Complete | Work | 9C: CPU clock at startup | `registerMetadataStorageFromInodeDB` calls `absl::base_internal::NominalCPUFrequency`. A trace of a forked insert's 22 store calls put 4.3 ms in the first, `Read owner`, against 0.05 to 0.17 ms for the stats, reads and lists after it (`build/gate_call_trace.txt`); `strace -k` on a process that attaches the disk put sleeps of 1 and 2 ms there, under `Mutex::LockSlow` in gRPC's `PollerWorkInternal` (`build/gate_strace_sleep_stack.txt`, symbolized in `build/gate_sleep_stack_symbolized.txt`; the calls around them in `build/gate_strace_first_call.txt`). With the clock measured in the forking parent, the insert's time from call to answer fell from 22.2 to 22.5 ms to 19.1 to 19.2 ms, two runs each way (`build/gate_loop_tsc_{cold,warm}_{1,2}.log`). |
+| Complete | Test | 9D: Gtests | `build/test_small_gtests.log` on `71a2c6464`: 137 pass, among them `InodeDBRefusesFewerThanThreeGrpcThreads` and `InodeDBDiskBuildsItsS3ClientOnFirstUse`. |
+| Complete | Test | 9D: `tests/startup.py` | `build/test_startup_final.log` on `71a2c6464`: 13 of 13. A server whose only disk is `inodedb` counts no `S3Clients` after its start, a small insert, a config reload with another request timeout, and a restart; its first blob and its first read of one each build the client. gRPC's pool keeps 16 threads on 24 cores, and 4 with the setting, counted by stack and asked again while a busy machine misses a thread's stack (6 of 6 runs at a load of 29, `build/test_startup_load_*.log`); a server asked for 2 exits with the reason. On `3ef1e9ead` four of the `s3_client` checks fail (`build/test_startup_1.log`). |
+| In Progress | Gate | 15 ms of CPU and 20 ms for libch's forked insert | BigHouse's runs of libch's benchmark at `4da5d57`, against InodeDB `f7ce02f`, a local merge of the fork's changes into `libch-worker` `d2da2529c`, medians of 30 calls: at 10 parts a table 16.3 ms of CPU and 24.8 ms before, 14.1 ms and 22.0 ms with 9A and 9B, and 19.1 to 19.2 ms with 9C; at 500 parts 15.8 ms and 23.7 ms before, 13.9 ms and 21.5 ms with 9A and 9B; a merge of four parts 17.0 ms and 26.3 ms before, 14.6 ms and 25.0 ms with 9A and 9B. Missing: libch's recorded rows on `71a2c6464` at 10, 100, 500 and 10,000 parts. |
+| In Progress | Test | Existing suites | On fork `71a2c6464` and InodeDB `f7ce02f` (`build/test_small_*.log`), with the machine busy building: 137 gtests; wide 77 of 77; features 23 of 23; fence 4 of 4; replicas 10 of 10; discovery 21 of 21; crash 30 of 30 rounds; claims 3 of 3; shared 120 of 120, with 11,482 inserts acknowledged across 30 kills; `demo/e2e.py` 28 of 28. Missing: `tests/bench.py` on a quiet machine, and the stateless parity run. |
+| Complete | Doc | 9E: Docs | `README.md`: `inodedb_grpc_threads` and the suite list; `PRODUCTION.md`: when the S3 client is built. |

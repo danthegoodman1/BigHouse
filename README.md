@@ -165,6 +165,7 @@ The disk lives under the key's root. A write key makes a writer, and a read key,
 | `inodedb_lease_lag_ms` | 10 min | How long a replica's lease holds blobs it may still read |
 | `inodedb_cache_bytes` | 256 MiB | What the metadata cache holds |
 | `inodedb_attempt_timeout_ms`, `inodedb_retry_timeout_ms` | 10 s, 60 s | Deadlines for one InodeDB call and for its retries |
+| `inodedb_grpc_threads` | 0 | How many threads gRPC keeps while idle, for the whole process; 0 leaves gRPC's own number, one for each core between 4 and 16. A process that serves one operation sets 4. The disk refuses 1 and 2 |
 
 The query API takes `--port` (8080) and `--slots` (16), and reads the disk's location from `.dev/demo/config.json`, which `demo/up` writes. Slot `i` uses native port 20000+i, HTTP port 21000+i and interserver port 22000+i on `127.0.0.1`.
 
@@ -189,6 +190,7 @@ python3 tests/claims.py                           # a writer killed between clai
 python3 tests/fence.py                            # a second writer takes the disk, and the first commits nothing
 python3 tests/shared.py [--kill-rounds N]         # shared writers: inserts, merges, claims, fences and kills
 python3 tests/wide.py                             # parts of more files than one commit holds: inserts, merges and kills
+python3 tests/startup.py                          # what attaching the disk starts: no S3 client before a blob, gRPC's threads
 python3 tests/replicas.py                         # a replica sees the writer's parts and drops, and outlives its cleanup
 python3 tests/discovery.py                        # fleets attach the writer's databases from InodeDB
 python3 tests/parity.py                           # ClickHouse's stateless tests on both metadata types
