@@ -7,8 +7,8 @@ part's temporary directory, and the part's last commit publishes them with its r
 
 - `exclusive`: on an exclusive writer, inserts of a `JSON` column of 1,024 paths, of paths with three types each, and
   of three such columns commit, and their rows read back. A part that fits one commit takes one. A duplicate of a
-  staged insert leaves nothing. Compact parts merge into a wide part, a mutation rewrites it, and dropping the table
-  frees every blob.
+  staged insert leaves nothing. Parts with a projection of the column merge. Compact parts merge into a wide part, a
+  mutation rewrites it, and dropping the tables frees every blob.
 - `shared`: the same inserts and the merge through shared writers. A second writer and a replica see nothing of a
   part between its stages, and all of it after its last commit.
 - `kills`: a writer killed after each stage of an insert and of a merge, and before an insert's last commit, restarts
