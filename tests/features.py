@@ -288,8 +288,8 @@ def scenario_wide_part(s: stack.Server, p: str) -> list[str]:
 
 def scenario_sparse_wide_part(s: stack.Server, p: str) -> list[str]:
     # The shape of `system.query_metric_log`: 1,728 counters of long names, each zero in most rows. Each column is
-    # sparse and writes 4 files, so the part holds about 6,900 files: more than one InodeDB commit takes beside their
-    # inline content.
+    # sparse and writes 4 files, so the part holds about 6,900 files: more than the 4,096 one InodeDB commit takes, so
+    # it commits in stages.
     columns = 1728
     s.query(f"CREATE TABLE t (k UInt64, "
             f"{', '.join(f'ProfileEvent_CounterInAWideTableOfMetrics{i:04d} UInt64 DEFAULT if(sipHash64(k, {i}) % 32 = 0, sipHash64(k, {i}) % 100000, 0)' for i in range(columns))}) "
