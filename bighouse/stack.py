@@ -6,6 +6,7 @@ disks keep blobs in s3proxy and metadata in InodeDB. It uses only the standard l
 
 from __future__ import annotations
 
+import http.client
 import os
 import select
 import shutil
@@ -256,6 +257,9 @@ class Server:
                 return response.read().decode()
         except urllib.error.HTTPError as error:
             raise QueryError(f"{self.name}: {error.read().decode().strip()}") from None
+        except http.client.HTTPException as error:
+            # The server went away partway through its answer, as when a test kills it.
+            raise ConnectionError(f"{self.name}: {error!r}") from None
 
     def value(self, sql: str, **kwargs) -> str:
         return self.query(sql, **kwargs).strip()

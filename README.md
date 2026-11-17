@@ -17,7 +17,7 @@ The disk matches an S3 disk with `local` metadata feature for feature. Of ClickH
 
 **Real renames and hardlinks.** A directory on the disk is an InodeDB directory, so renaming a part rewrites one entry, and a hardlink is a second entry naming the same inode. Mutations, `ATTACH PARTITION FROM` and `FREEZE` change only metadata.
 
-**One fenced commit per transaction.** Each metadata transaction commits as one all-or-nothing InodeDB batch, and an insert commits once: its part's files, its rename to its final name and its deduplication tokens go in the same batch, so a retried insert lands once even after a crash or a fence. A starting exclusive writer takes the disk by writing its `owner` file and fences every batch on that file's version, so once it starts, every other writer commits nothing more. A retried batch carries its first request id, so it applies once.
+**One fenced commit per transaction.** Each metadata transaction commits as one all-or-nothing InodeDB batch, and an insert commits once: its part's files, its rename to its final name and its deduplication tokens go in the same batch, so a retried insert lands once even after a crash or a fence. A part of more than 4,096 files, such as a wide part with a `JSON` column of a thousand paths, first commits files in stages under its temporary directory, which no reader loads, and the same last batch publishes them all. A starting exclusive writer takes the disk by writing its `owner` file and fences every batch on that file's version, so once it starts, every other writer commits nothing more. A retried batch carries its first request id, so it applies once.
 
 **Shared writers.** With `inodedb_writer_mode` set to `shared`, several servers insert into and merge one disk's tables at once. Each insert's batch takes the table's next block number from a counter in InodeDB, and a merge claims its source parts before it starts and commits only while it holds them, so no two writers merge one part, and a writer with a stale view of the parts merges nothing over another's result. DDL, mutations and partition commands go through a brief exclusive writer, which fences the shared ones until they restart. `tests/shared.py` kills shared writers at random under concurrent inserts and merges, and every acknowledged insert lands once.
 
@@ -84,7 +84,7 @@ An `inodedb` insert is durable when it returns: it makes one InodeDB commit, whi
 - **One query per fleet server.** A config reload can add a disk but cannot remove one or change its key, so each server serves one query and is then replaced. Back to back on 8 slots, fleets of 4 average 276 ms a query against 126 ms with the pool settled, because each waits for servers still booting.
 - **Schema changes reach the next fleet.** Each fleet reads the schema as it attaches. A long-lived replica keeps the schema it attached with.
 - **Databases a fleet leaves out.** A fleet serves tables whose data lies on the disk, so it leaves out databases with `Memory` tables, tables on other disks, or refreshable materialized views, and names them in the response.
-- **Uncommitted blobs.** A writer that crashes or loses the disk leaves in S3 the blobs of parts it had not committed, a part waiting for the table's lock among them. `local` metadata leaves those of parts still being written.
+- **Uncommitted blobs.** A writer that crashes or loses the disk leaves in S3 the blobs of parts it had not committed, a part waiting for the table's lock among them. `local` metadata leaves those of parts still being written. The files a large part committed in stages stay in its temporary directory, and their blobs go when the directory does: an exclusive writer removes temporary directories as it starts, and shared writers remove those older than `temporary_directories_lifetime`.
 - **Whole-part replication.** Zero-copy replication ships local metadata files between replicas, so `inodedb` turns it off, and `ReplicatedMergeTree` replicas on it fetch whole parts. BigHouse's own replicas read the writer's tree instead.
 - **One machine so far.** Every part of the demo runs on one host. [PRODUCTION.md](PRODUCTION.md) describes how each runs on its own.
 
@@ -160,7 +160,7 @@ The disk lives under the key's root. A write key makes a writer, and a read key,
 | `inodedb_claim_ttl_ms` | 60 s | How long a shared writer's merge claim lasts unless renewed; renewals come every third of it |
 | `inodedb_deduplication_token_ttl_seconds` | 1 h | How long shared writers keep a deduplication token; an exclusive writer keeps `non_replicated_deduplication_window` tokens |
 | `inodedb_inline_file_max_bytes` | 16 KiB | Keep files up to this size in InodeDB, with no blob |
-| `inodedb_commit_max_bytes` | 6 MiB | Keep one commit within this size, counting its inline files and 1.5 KiB for each operation; the commit writes its largest inline files to blobs to fit, so one InodeDB commit holds a part of about 7,400 files |
+| `inodedb_commit_max_bytes` | 6 MiB | Keep one commit within this size, counting its inline files and 1.5 KiB for each operation. A part of up to 4,096 files takes one commit, which writes its largest inline files to blobs to fit. A larger part commits in stages of that size and keeps its small files inline |
 | `inodedb_spill_threshold` | 32 KiB | Move a file's record larger than this to a blob of its own |
 | `inodedb_lease_lag_ms` | 10 min | How long a replica's lease holds blobs it may still read |
 | `inodedb_cache_bytes` | 256 MiB | What the metadata cache holds |
@@ -188,6 +188,7 @@ python3 tests/crash.py 100                        # 100 rounds of SIGKILL under 
 python3 tests/claims.py                           # a writer killed between claiming and deleting blobs leaks none
 python3 tests/fence.py                            # a second writer takes the disk, and the first commits nothing
 python3 tests/shared.py [--kill-rounds N]         # shared writers: inserts, merges, claims, fences and kills
+python3 tests/wide.py                             # parts of more files than one commit holds: inserts, merges and kills
 python3 tests/replicas.py                         # a replica sees the writer's parts and drops, and outlives its cleanup
 python3 tests/discovery.py                        # fleets attach the writer's databases from InodeDB
 python3 tests/parity.py                           # ClickHouse's stateless tests on both metadata types
